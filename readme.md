@@ -53,8 +53,8 @@ Getting the viewer up and running is straightforward. Ensure you have Python 3.6
 
 1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/YOUR_USERNAME/YOUR_REPOSITORY_NAME.git
-    cd YOUR_REPOSITORY_NAME
+    git clone https://github.com/robbinc91/advanced-3d-mri-viewer.git
+    cd advanced-3d-mri-viewer
     ```
 
 2.  **Install the dependencies:**
