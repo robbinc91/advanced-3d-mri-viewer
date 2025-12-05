@@ -1,1 +1,9 @@
 __pycache__
+modified_mri.nii.gz
+mri.nii
+test.py
+build_exe.bat
+build
+dist
+MRI_Viewer.spec
+file_info.rc
