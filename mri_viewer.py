@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QLabel, QScrollArea, QStatusBar, QMessageBox,
                              QFileDialog, QSpinBox, QSlider, QCheckBox,
                              QStackedLayout, QShortcut, QSplitter, QComboBox,
-                             QDoubleSpinBox)
+                             QDoubleSpinBox, QStyle, QSizePolicy)
 from PyQt5.QtGui import QKeySequence
 from style import MAIN_STYLE
 
@@ -170,11 +170,18 @@ class MRIViewer(QMainWindow):
         normal_view_widget = QWidget()
         normal_layout = QHBoxLayout(normal_view_widget)
         
+        # Use a splitter so the user can resize the left menu horizontally
+        splitter = QSplitter(Qt.Horizontal)
         left_panel = self.build_left_panel()
-        normal_layout.addWidget(left_panel, 1)
-        
         right_panel = self.build_vis_grid()
-        normal_layout.addWidget(right_panel, 4)
+        splitter.addWidget(left_panel)
+        splitter.addWidget(right_panel)
+        splitter.setHandleWidth(6)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 4)
+        splitter.setSizes([360, 1100])
+
+        normal_layout.addWidget(splitter)
         
         self.stacked_layout.addWidget(normal_view_widget)
         
@@ -182,17 +189,42 @@ class MRIViewer(QMainWindow):
         self.statusBar().showMessage("Ready")
     
     def build_left_panel(self):
+        # Create a fixed-width, scrollable left panel for many controls
         panel = QWidget()
         layout = QVBoxLayout(panel)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(8)
         
         # --- File Operations ---
         file_group = QGroupBox("File Operations")
+        file_group.setCheckable(True)
+        file_group.setChecked(True)
         file_layout = QVBoxLayout()
         
         self.btn_load_mri = QPushButton("Load MRI")
         self.btn_load_mask = QPushButton("Load Mask")
         self.btn_export_screenshot = QPushButton("Export Screenshot")
         self.btn_export_mri_data = QPushButton("Export Modified MRI (.nii.gz)")
+        # Set icons and shortcuts for quicker use
+        self.btn_load_mri.setToolTip("Load an MRI file (Ctrl+O)")
+        self.btn_load_mask.setToolTip("Load a mask file (Ctrl+M)")
+        self.btn_export_screenshot.setToolTip("Export screenshot (Ctrl+P)")
+        self.btn_export_mri_data.setToolTip("Export modified MRI (Ctrl+S)")
+
+        open_icon = QApplication.style().standardIcon(QStyle.SP_DialogOpenButton)
+        save_icon = QApplication.style().standardIcon(QStyle.SP_DialogSaveButton)
+        pic_icon = QApplication.style().standardIcon(QStyle.SP_FileDialogDetailedView)
+        mask_icon = QApplication.style().standardIcon(QStyle.SP_DirOpenIcon)
+
+        self.btn_load_mri.setIcon(open_icon)
+        self.btn_load_mask.setIcon(mask_icon)
+        self.btn_export_screenshot.setIcon(pic_icon)
+        self.btn_export_mri_data.setIcon(save_icon)
+
+        self.btn_load_mri.setShortcut('Ctrl+O')
+        self.btn_load_mask.setShortcut('Ctrl+M')
+        self.btn_export_screenshot.setShortcut('Ctrl+P')
+        self.btn_export_mri_data.setShortcut('Ctrl+S')
         
         file_layout.addWidget(self.btn_load_mri)
         file_layout.addWidget(self.btn_load_mask)
@@ -202,6 +234,8 @@ class MRIViewer(QMainWindow):
         
         # --- Clinical Image Processing ---
         proc_group = QGroupBox("Clinical Image Processing")
+        proc_group.setCheckable(True)
+        proc_group.setChecked(True)
         proc_layout = QVBoxLayout()
         
         # 1. Parameter Input (General)
@@ -323,6 +357,8 @@ class MRIViewer(QMainWindow):
 
         # --- Mask Controls ---
         mask_group = QGroupBox("Mask Controls")
+        mask_group.setCheckable(True)
+        mask_group.setChecked(True)
         mask_layout = QVBoxLayout()
         
         self.show_mask_check = QCheckBox("Show Mask")
@@ -344,6 +380,8 @@ class MRIViewer(QMainWindow):
         
         # --- Rendering Options ---
         render_group = QGroupBox("Rendering Options")
+        render_group.setCheckable(True)
+        render_group.setChecked(True)
         render_layout = QVBoxLayout()
         
         self.volume_rendering_check = QCheckBox("Volume Rendering")
@@ -354,6 +392,8 @@ class MRIViewer(QMainWindow):
         render_group.setLayout(render_layout)
 
         annotation_group = QGroupBox("Annotations")
+        annotation_group.setCheckable(True)
+        annotation_group.setChecked(True)
         anno_layout = QVBoxLayout()
         
         self.btn_toggle_anno = QPushButton("Toggle Annotation Mode")
@@ -369,6 +409,33 @@ class MRIViewer(QMainWindow):
         layout.addWidget(render_group)
         layout.addWidget(annotation_group)
         layout.addStretch()
+
+        # Make groups collapsible by toggling visibility of their internal widgets
+        def make_collapsible(group: QGroupBox, inner_layout: QVBoxLayout):
+            def on_toggle(checked):
+                for i in range(inner_layout.count()):
+                    w = inner_layout.itemAt(i).widget()
+                    if w:
+                        w.setVisible(checked)
+            group.toggled.connect(on_toggle)
+
+        make_collapsible(file_group, file_layout)
+        make_collapsible(proc_group, proc_layout)
+        make_collapsible(mask_group, mask_layout)
+        make_collapsible(render_group, render_layout)
+        make_collapsible(annotation_group, anno_layout)
+
+        # Wrap left panel in a scroll area; disable horizontal scrollbar and allow adjustable width
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(panel)
+        scroll.setObjectName('left_panel_scroll')
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setMinimumWidth(220)
+        scroll.setMaximumWidth(800)
+        scroll.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+
+        scroll.setStyleSheet("QScrollArea#left_panel_scroll { border: 1px solid #333; background: transparent; }")
         
         # Connect signals
         self.btn_load_mri.clicked.connect(self.load_mri)
@@ -376,8 +443,8 @@ class MRIViewer(QMainWindow):
         self.btn_export_screenshot.clicked.connect(self.export_screenshot)
         self.btn_export_mri_data.clicked.connect(self.export_modified_mri)
         self.btn_to_int.clicked.connect(self.convert_to_integer_labels) # NEW CONNECTION
-        
-        return panel
+
+        return scroll
     
     def toggle_clahe_controls(self, index):
         # Index 2 is CLAHE (due to separator)
@@ -1011,7 +1078,13 @@ class MRIViewer(QMainWindow):
     def build_vis_grid(self):
         grid_widget = QWidget()
         grid = QGridLayout(grid_widget)
-        grid.setSpacing(2)
+        grid.setSpacing(4)
+        grid_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Make grid rows/columns stretch so children expand
+        grid.setRowStretch(0, 1)
+        grid.setRowStretch(1, 1)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
 
         self.view_grid = grid
         self.view_grid_positions = {
@@ -1026,6 +1099,7 @@ class MRIViewer(QMainWindow):
             view_panel_layout = QVBoxLayout(view_panel)
             view_panel_layout.setContentsMargins(2, 2, 2, 2)
             view_panel_layout.setSpacing(2)
+            view_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
             title_bar = QWidget()
             title_bar_layout = QHBoxLayout(title_bar)
@@ -1052,8 +1126,10 @@ class MRIViewer(QMainWindow):
             content_layout = QHBoxLayout(content_area)
             content_layout.setContentsMargins(0, 0, 0, 0)
             content_layout.setSpacing(2)
+            content_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
             vtk_widget = QVTKRenderWindowInteractor()
+            vtk_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             renderer = vtk.vtkRenderer()
             renderer.SetBackground(0.1, 0.1, 0.1)
             renderer.SetUseDepthPeeling(True)
@@ -1077,6 +1153,7 @@ class MRIViewer(QMainWindow):
                 scroll_bar.setValue(50)
                 scroll_bar.setTickPosition(QSlider.TicksBothSides)
                 scroll_bar.setTickInterval(10)
+                scroll_bar.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Expanding)
                 
                 if view_name == 'axial':
                     self.axial_slider = scroll_bar

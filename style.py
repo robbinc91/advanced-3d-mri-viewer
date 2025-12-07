@@ -1,60 +1,90 @@
 MAIN_STYLE = """
-QWidget { 
-    background-color: #222; 
-    color: #EAEAEA; 
-    font: 10pt "Segoe UI"; 
+QWidget {
+    background-color: #1b1b1b;
+    color: #E8E8E8;
+    font: 9pt "Segoe UI";
 }
-QPushButton { 
-    background-color: #444; /* Slightly brighter button background */
-    border: 1px solid #777; /* Higher contrast border */
-    padding: 6px; 
-    border-radius: 4px; 
-    text-align: left; /* Aligns text/icons to the left */
+
+/* Left panel scroll area */
+QScrollArea#left_panel_scroll {
+    background-color: transparent;
+    border: none;
 }
-QPushButton:hover { 
-    background-color: #555; 
+
+QPushButton {
+    background-color: #2f2f33;
+    border: 1px solid #3d3d42;
+    padding: 5px 8px;
+    border-radius: 6px;
+    text-align: left;
 }
+QPushButton:hover {
+    background-color: #38383d;
+}
+
 QGroupBox {
-    font-weight: bold;
-    border: 1px solid #777; /* Higher contrast border for visibility */
-    border-radius: 5px;
-    margin-top: 10px;
-    padding-top: 10px;
-    background-color: #2A2A2A; /* Subtle background for sections */
+    font-weight: 600;
+    border: 1px solid #2e2e33;
+    border-radius: 6px;
+    margin-top: 8px;
+    padding: 6px 8px 8px 8px;
+    background-color: #212125;
 }
 QGroupBox::title {
     subcontrol-origin: margin;
-    left: 10px;
-    padding: 0 5px 0 5px;
-    color: #B2FF00; /* Highlight group titles with a bright color */
+    left: 8px;
+    padding: 0 4px;
+    color: #8FD14F;
+    font-size: 9pt;
 }
+
 QLabel {
-    /* Ensure all labels, including instructions, are clearly visible */
-    color: #CCC;
+    color: #dcdcdc;
+    font-size: 9pt;
 }
+
 QCheckBox {
-    padding: 3px 0;
+    padding: 2px 0;
 }
+
+/* Sliders: thinner groove and compact handle */
 QSlider::groove:horizontal {
-    background: #555; /* Higher contrast groove */
-    height: 6px; 
+    background: #333;
+    height: 5px;
     border-radius: 3px;
 }
 QSlider::handle:horizontal {
-    background: #B2FF00; /* Bright handle color */
-    width: 16px;
-    margin: -5px 0;
-    border-radius: 8px;
+    background: #6FC3A6;
+    width: 12px;
+    margin: -4px 0;
+    border-radius: 6px;
 }
 QSlider::groove:vertical {
-    background: #555;
-    width: 6px;
+    background: #333;
+    width: 5px;
     border-radius: 3px;
 }
 QSlider::handle:vertical {
-    background: #B2FF00;
-    height: 16px;
-    margin: 0 -5px;
-    border-radius: 8px;
+    background: #6FC3A6;
+    height: 12px;
+    margin: 0 -4px;
+    border-radius: 6px;
 }
+
+QSpinBox, QDoubleSpinBox, QComboBox {
+    background-color: #232327;
+    border: 1px solid #2f2f33;
+    padding: 4px;
+    border-radius: 4px;
+    min-height: 22px;
+}
+
+/* Tweak group spacing for denser layout */
+QGroupBox QWidget { margin-top: 4px; }
+
+/* Subtle separators for clarity */
+QGroupBox::indicator { margin-left: 6px; }
+
+/* Make tooltips easier to read */
+QToolTip { background-color: #2b2b2b; color: #fff; border: 1px solid #555; }
 """
