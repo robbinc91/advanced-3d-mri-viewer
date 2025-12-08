@@ -10,14 +10,16 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QLabel, QScrollArea, QStatusBar, QMessageBox,
                              QFileDialog, QSpinBox, QSlider, QCheckBox,
                              QStackedLayout, QShortcut, QSplitter, QComboBox,
-                             QDoubleSpinBox)
+                             QDoubleSpinBox, QScrollArea)
 from PyQt5.QtGui import QKeySequence
 from src.utils.style import MAIN_STYLE, QSS_THEME
 from vtk.util import numpy_support # Add to imports
-#from reportlab.lib.pagesizes import letter
-#from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-#from reportlab.lib.styles import getSampleStyleSheet
-#from reportlab.lib import colors
+import json
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib import colors
+import traceback
 
 # --- Import Dependencies ---
 from src.utils.check_imports import *
@@ -40,6 +42,16 @@ class MRIViewer(QMainWindow):
         # Data holders
         self.mri_data = None
         self.mask_data = None
+
+        self.fileName = None
+        self.header = None
+        self.affine = None
+
+        # Persistent storage for label map
+        self.label_config_path = "label_config.json"
+        self.label_map = {} # {voxel_value (int): "Label Name" (str)}
+        self.load_label_config() # Attempt to load config on startup
+
         self.mri_header = None
         self.mri_affine = None # To store the affine matrix
         self.mask_header = None
@@ -85,6 +97,175 @@ class MRIViewer(QMainWindow):
             traceback.print_exc()
             QMessageBox.critical(self, "UI Error", f"Failed to build UI: {str(e)}")
             sys.exit(1)
+
+    def load_label_config(self, filepath=None):
+        """Loads the label configuration from a JSON file."""
+        if filepath:
+            self.label_config_path = filepath
+        
+        try:
+            with open(self.label_config_path, 'r') as f:
+                # Load JSON and convert keys to integers, as JSON saves them as strings
+                data = json.load(f)
+                self.label_map = {int(k): v for k, v in data.items()}
+            self.statusBar().showMessage(f"Loaded label config from: {self.label_config_path}")
+            return True
+        except FileNotFoundError:
+            self.statusBar().showMessage(f"Label config file not found. Using default empty map.")
+            self.label_map = {}
+            return False
+        except Exception as e:
+            QMessageBox.critical(self, "Config Error", f"Failed to load label config: {e}")
+            self.label_map = {}
+            return False
+
+    def save_label_config(self):
+        """Saves the current label map to the persistent JSON file."""
+        try:
+            # We save keys as strings, standard for JSON
+            with open(self.label_config_path, 'w') as f:
+                json.dump(self.label_map, f, indent=4)
+            self.statusBar().showMessage(f"Saved label config to: {self.label_config_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Config Error", f"Failed to save label config: {e}")
+
+    def prompt_load_label_config(self):
+        """Prompts the user to select and load a JSON label config file."""
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "Load Label Configuration", "", "JSON Files (*.json)"
+        )
+        if filepath:
+            self.load_label_config(filepath)
+
+    def prompt_save_label_config(self):
+        """Prompts the user to select a path to save the current label config file."""
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Save Label Configuration", self.label_config_path, "JSON Files (*.json)"
+        )
+        if filepath:
+            self.label_config_path = filepath
+            self.save_label_config()
+
+    def calculate_label_volumes(self):
+        """
+        Calculates the volume for each label found in the loaded mask_data.
+        
+        Returns:
+            A dictionary {label_name: volume_cm3}
+        """
+        if self.mask_data is None:
+            QMessageBox.warning(self, "Reporting Error", "No segmentation mask data loaded.")
+            return {}
+        
+        if self.header is None:
+            QMessageBox.warning(self, "Reporting Error", 
+                                "Cannot calculate volume: NiBabel header (voxel size) is missing.")
+            return {}
+
+        # 1. Get Voxel Dimensions
+        try:
+            # NiBabel headers store voxel sizes in qform_code/sform_code
+            # pixdim[1:4] is typically used for spatial dimensions (mm or similar)
+            voxel_dims = self.header.get_zooms()[:3]
+            voxel_volume_mm3 = voxel_dims[0] * voxel_dims[1] * voxel_dims[2]
+            # Convert mm³ to cm³ (1 cm³ = 1000 mm³)
+            voxel_volume_cm3 = voxel_volume_mm3 / 1000.0
+        except Exception as e:
+            QMessageBox.critical(self, "Volume Error", f"Failed to read voxel dimensions: {e}")
+            return {}
+
+        # 2. Count Voxels for each unique label value
+        unique_labels, counts = np.unique(self.mask_data, return_counts=True)
+        volume_results = {}
+        
+        # 3. Calculate Volume and Map Names
+        for label_val, count in zip(unique_labels, counts):
+            # Skip label 0, which is typically the background
+            if label_val == 0:
+                continue
+
+            # Get the name from the config map, or use the integer value as a fallback
+            label_name = self.label_map.get(label_val, f"Label_{label_val} (UNMAPPED)")
+            
+            # Volume = Voxel Count * Volume per Voxel
+            volume_cm3 = count * voxel_volume_cm3
+            
+            volume_results[label_name] = volume_cm3
+            
+        return volume_results
+
+    def export_volume_report(self):
+        """Calculates volumes and exports a PDF report."""
+        
+        volume_results = self.calculate_label_volumes()
+        if not volume_results:
+            self.statusBar().showMessage("Export failed: No valid volumes calculated.")
+            return
+
+        # Prompt user for save location
+        default_filename = f"MRI_Volume_Report_{self.fileName or 'Untitled'}.pdf"
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Export Volume Report", default_filename, "PDF Files (*.pdf)"
+        )
+        
+        if not filepath:
+            return
+
+        self.statusBar().showMessage(f"Generating PDF report: {filepath}...")
+        
+        try:
+            # --- START PDF GENERATION (Using ReportLab structure) ---
+            
+            from reportlab.lib.pagesizes import letter # Assumes ReportLab import at top
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+            from reportlab.lib.styles import getSampleStyleSheet
+            from reportlab.lib import colors
+
+            document = SimpleDocTemplate(filepath, pagesize=letter)
+            styles = getSampleStyleSheet()
+            story = []
+
+            # Title
+            story.append(Paragraph("NeuroView MRI Volume Report", styles['Title']))
+            story.append(Spacer(1, 12))
+
+            # Metadata
+            story.append(Paragraph(f"<b>Source File:</b> {self.fileName or 'N/A'}", styles['Normal']))
+            story.append(Paragraph(f"<b>Mask Configuration:</b> {self.label_config_path}", styles['Normal']))
+            story.append(Spacer(1, 12))
+            
+            # Data Table
+            table_data = [["Label Name", "Volume (cm³)", "Volume (mm³)"]]
+            for name, vol_cm3 in volume_results.items():
+                vol_mm3 = vol_cm3 * 1000.0
+                table_data.append([
+                    name,
+                    f"{vol_cm3:.3f}",
+                    f"{vol_mm3:.1f}"
+                ])
+
+            table = Table(table_data)
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+            ]))
+            
+            story.append(table)
+            
+            document.build(story)
+            
+            self.statusBar().showMessage(f"Report successfully exported to {filepath}")
+            # --- END PDF GENERATION ---
+            
+        except ImportError:
+            QMessageBox.critical(self, "Export Error", "PDF Library (e.g., reportlab) not found. Please install it.")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", f"An error occurred during PDF generation: {e}")
     
     def build_ui(self):
         central_widget = QWidget()
@@ -272,27 +453,27 @@ class MRIViewer(QMainWindow):
         
 
         # --- Optimization 4: Window/Level Presets ---
-        wl_group = QGroupBox("Window / Level (Contrast)")
-        wl_layout = QVBoxLayout()
+        #wl_group = QGroupBox("Window / Level (Contrast)")
+        #wl_layout = QVBoxLayout()
         
-        wl_layout.addWidget(QLabel("Clinical Presets:"))
-        self.combo_wl = QComboBox()
-        self.combo_wl.addItems([
-            "Select Preset...",
-            "Full Dynamic Range (Default)",
-            "Brain (High Contrast)",
-            "Soft Tissue (Wide)",
-            "Bone / Hard Structure",
-            "Stroke (Narrow)",
-        ])
-        self.combo_wl.currentIndexChanged.connect(self.apply_wl_preset)
-        wl_layout.addWidget(self.combo_wl)
+        #wl_layout.addWidget(QLabel("Clinical Presets:"))
+        #self.combo_wl = QComboBox()
+        #self.combo_wl.addItems([
+        #    "Select Preset...",
+        #    "Full Dynamic Range (Default)",
+        #    "Brain (High Contrast)",
+        #    "Soft Tissue (Wide)",
+        #    "Bone / Hard Structure",
+        #    "Stroke (Narrow)",
+        #])
+        #self.combo_wl.currentIndexChanged.connect(self.apply_wl_preset)
+        #wl_layout.addWidget(self.combo_wl)
         
         # Add a custom slider for manual W/L fine tuning if desired
         # (For brevity, just the dropdown is shown here)
         
-        wl_group.setLayout(wl_layout)
-        layout.addWidget(wl_group) # Add to main left panel layout
+        #wl_group.setLayout(wl_layout)
+        #layout.addWidget(wl_group) # Add to main left panel layout
 
 
         # --- Rendering Options ---
@@ -320,8 +501,32 @@ class MRIViewer(QMainWindow):
         layout.addWidget(proc_group)
         layout.addWidget(mask_group)
         layout.addWidget(render_group)
-        layout.addWidget(annotation_group)
+        #layout.addWidget(annotation_group)
         layout.addStretch()
+
+        # --- NEW: Reporting & Configuration Group ---
+        report_group = QGroupBox("Reporting & Configuration")
+        report_layout = QVBoxLayout()
+        # Button to load a custom JSON label config
+        btn_load_config = QPushButton("Load Label Config (JSON)")
+        btn_load_config.clicked.connect(self.prompt_load_label_config)
+        report_layout.addWidget(btn_load_config)
+        # Button to save the current label config
+        btn_save_config = QPushButton("Save Current Label Config")
+        btn_save_config.clicked.connect(self.prompt_save_label_config)
+        report_layout.addWidget(btn_save_config)
+        report_layout.addWidget(QLabel("---"))
+        # Button to export the final PDF report
+        self.btn_export_report = QPushButton("Export Volume Report (PDF)")
+        self.btn_export_report.clicked.connect(self.export_volume_report)
+        # You may want to disable this if self.mask_data is None
+        report_layout.addWidget(self.btn_export_report)
+
+        report_group.setLayout(report_layout)
+        layout.addWidget(report_group)
+        layout.addStretch()
+
+
         
         # Connect signals
         self.btn_load_mri.clicked.connect(self.load_mri)
@@ -329,6 +534,8 @@ class MRIViewer(QMainWindow):
         self.btn_export_screenshot.clicked.connect(self.export_screenshot)
         self.btn_export_mri_data.clicked.connect(self.export_modified_mri)
         self.btn_to_int.clicked.connect(self.convert_to_integer_labels) # NEW CONNECTION
+        
+
         
         return panel
 
@@ -1171,6 +1378,9 @@ class MRIViewer(QMainWindow):
             self.mri_data = img.get_fdata()
             self.mri_header = img.header
             self.mri_affine = img.affine # Store the affine matrix from the image object
+
+            self.header = img.header
+            self.affine = img.affine
             
             depth, height, width = self.mri_data.shape
             
@@ -1215,6 +1425,9 @@ class MRIViewer(QMainWindow):
             self.statusBar().showMessage(f"Loading mask from: {filepath}")
             img = nib.load(filepath)
             mask_data = img.get_fdata()
+
+            #self.header = mask_img.header
+            #self.affine = mask_img.affine
             
             if mask_data.shape != self.mri_data.shape:
                 QMessageBox.critical(self, "Error", 
