@@ -16,11 +16,13 @@ from src.utils.style import MAIN_STYLE, QSS_THEME
 from vtk.util import numpy_support # Add to imports
 import json
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
 import traceback
-
+import tempfile
+import os
+import vtk # Assuming this is already imported
 # --- Import Dependencies ---
 from src.utils.check_imports import *
 from src.utils.mouse_wheel_interactor_style import MouseWheelInteractorStyle
@@ -195,7 +197,7 @@ class MRIViewer(QMainWindow):
         return volume_results
 
     def export_volume_report(self):
-        """Calculates volumes and exports a PDF report."""
+        """Calculates volumes and exports a PDF report, including images."""
         
         volume_results = self.calculate_label_volumes()
         if not volume_results:
@@ -208,16 +210,16 @@ class MRIViewer(QMainWindow):
             self, "Export Volume Report", default_filename, "PDF Files (*.pdf)"
         )
         
-        if not filepath:
-            return
-
+        if not filepath: return
         self.statusBar().showMessage(f"Generating PDF report: {filepath}...")
+
+        # List to hold temporary image paths for cleanup
+        temp_images = []
         
         try:
-            # --- START PDF GENERATION (Using ReportLab structure) ---
-            
-            from reportlab.lib.pagesizes import letter # Assumes ReportLab import at top
-            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+            # --- START PDF GENERATION (ReportLab Structure) ---
+            from reportlab.lib.pagesizes import letter
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
             from reportlab.lib.styles import getSampleStyleSheet
             from reportlab.lib import colors
 
@@ -225,16 +227,48 @@ class MRIViewer(QMainWindow):
             styles = getSampleStyleSheet()
             story = []
 
-            # Title
+            # 1. Title and Metadata
             story.append(Paragraph("NeuroView MRI Volume Report", styles['Title']))
-            story.append(Spacer(1, 12))
-
-            # Metadata
             story.append(Paragraph(f"<b>Source File:</b> {self.fileName or 'N/A'}", styles['Normal']))
             story.append(Paragraph(f"<b>Mask Configuration:</b> {self.label_config_path}", styles['Normal']))
             story.append(Spacer(1, 12))
+
+            # 2. 2D Slices with Mask Overlay
+            story.append(Paragraph("<b>2D Slices with Segmentation Mask Overlay</b>", styles['Heading2']))
+            slice_images = []
             
-            # Data Table
+            for view in ['axial', 'coronal', 'sagittal']:
+                path = self._create_2d_slice_snapshot(view, size=(200, 200)) # Small image size
+                if path:
+                    temp_images.append(path)
+                    # Use a fixed width/height for display in PDF
+                    slice_images.append(Image(path, width=150, height=150))
+            
+            if slice_images:
+                story.append(Table([[
+                    Paragraph("Axial", styles['Code']), 
+                    Paragraph("Coronal", styles['Code']), 
+                    Paragraph("Sagittal", styles['Code'])
+                ], slice_images]))
+                story.append(Spacer(1, 12))
+
+            # 3. 3D Views - All Labels
+            if self.mask_data is not None:
+                story.append(Paragraph("<b>3D Model: All Segmented Labels</b>", styles['Heading2']))
+                all_3d_images = []
+                for i in range(3):
+                    path = self._create_3d_snapshot(label_value=None, angle_index=i, size=(200, 200))
+                    if path:
+                        temp_images.append(path)
+                        all_3d_images.append(Image(path, width=150, height=150))
+                
+                if all_3d_images:
+                    story.append(Table([all_3d_images]))
+                    story.append(Spacer(1, 12))
+
+
+            # 4. Volume Data Table
+            story.append(Paragraph("<b>Volumetric Analysis Table</b>", styles['Heading2']))
             table_data = [["Label Name", "Volume (cm³)", "Volume (mm³)"]]
             for name, vol_cm3 in volume_results.items():
                 vol_mm3 = vol_cm3 * 1000.0
@@ -254,18 +288,48 @@ class MRIViewer(QMainWindow):
                 ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
                 ('GRID', (0, 0), (-1, -1), 1, colors.black)
             ]))
-            
             story.append(table)
+            story.append(Spacer(1, 12))
+            
+            # 5. 3D Views - Individual Labels
+            if self.mask_data is not None and len(volume_results) > 0:
+                story.append(Paragraph("<b>3D Models: Individual Labels</b>", styles['Heading2']))
+                
+                for label_val in self.label_map.keys():
+                    if label_val in [0] or not (self.mask_data == label_val).any():
+                        continue # Skip background or non-existent labels
+                    
+                    label_name = self.label_map.get(label_val, f"Label_{label_val}")
+                    
+                    story.append(Paragraph(f"<b>{label_name}</b>", styles['Heading3']))
+                    
+                    individual_3d_images = []
+                    for i in range(3):
+                        path = self._create_3d_snapshot(label_val, angle_index=i, size=(150, 150))
+                        if path:
+                            temp_images.append(path)
+                            individual_3d_images.append(Image(path, width=100, height=100))
+                    
+                    if individual_3d_images:
+                        story.append(Table([individual_3d_images]))
+                        story.append(Spacer(1, 6))
+
             
             document.build(story)
-            
             self.statusBar().showMessage(f"Report successfully exported to {filepath}")
-            # --- END PDF GENERATION ---
-            
+
         except ImportError:
-            QMessageBox.critical(self, "Export Error", "PDF Library (e.g., reportlab) not found. Please install it.")
+            QMessageBox.critical(self, "Export Error", "PDF Library (reportlab) not found. Please install it.")
         except Exception as e:
             QMessageBox.critical(self, "Export Error", f"An error occurred during PDF generation: {e}")
+        finally:
+            # --- Cleanup Temporary Files ---
+            for path in temp_images:
+                if os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except OSError as e:
+                        print(f"Warning: Could not delete temp file {path}: {e}")
     
     def build_ui(self):
         central_widget = QWidget()
@@ -1875,4 +1939,255 @@ class MRIViewer(QMainWindow):
             vtk_widget = self.vtk_widgets.get(view_name)
             if vtk_widget:
                 QTimer.singleShot(100, lambda: vtk_widget.GetRenderWindow().Render())
+
+    def _get_representative_slice_index(self):
+        """Returns a central index for all three axes."""
+        if self.mri_data is None: return {'axial': 0, 'coronal': 0, 'sagittal': 0}
+        D, H, W = self.mri_data.shape # Z, Y, X
+        return {
+            'axial': D // 2,
+            'coronal': H // 2,
+            'sagittal': W // 2,
+        }
+
+    def _create_2d_slice_snapshot(self, view_name, size=(300, 300)):
+        """
+        Generates a 2D snapshot of the specified central slice with mask overlay
+        using vtkImageReslice to ensure orientation is correctly handled.
+        Returns the path to the saved PNG image.
+        """
+        if self.mri_data is None: return None
+
+        indices = self._get_representative_slice_index()
+        z_idx, y_idx, x_idx = indices['axial'], indices['coronal'], indices['sagittal']
+        
+        # 1. Setup Off-Screen Renderer
+        renderWindow = vtk.vtkRenderWindow()
+        renderWindow.SetOffScreenRendering(1)
+        renderWindow.SetSize(size)
+        renderer = vtk.vtkRenderer()
+        renderWindow.AddRenderer(renderer)
+        
+        # 2. Base Importer for MRI Data
+        importer = vtk.vtkImageImport()
+        mri_data_contiguous = self.mri_data.copy()
+        importer.SetImportVoidPointer(mri_data_contiguous, mri_data_contiguous.nbytes)
+        importer.SetDataScalarTypeToFloat()
+        importer.SetNumberOfScalarComponents(1)
+        # Note: Assuming VTK input order X, Y, Z (W, H, D in numpy shape)
+        importer.SetDataExtent(0, self.mri_data.shape[2] - 1, 
+                               0, self.mri_data.shape[1] - 1, 
+                               0, self.mri_data.shape[0] - 1)
+        importer.SetWholeExtent(importer.GetDataExtent())
+        importer.Update()
+        
+        # 3. Setup Reslice Transformation Matrix
+        # This matrix defines the coordinate system of the slice plane.
+        matrix = vtk.vtkMatrix4x4()
+        matrix.Identity() 
+
+        # The reslicer extracts a single slice from the new Z=0 plane (default).
+        # We manipulate the matrix's translation component (column 3) to select the desired slice index.
+        
+        if view_name == 'axial':
+            # Axial (Z-slice). Keep X, Y, Z axes, just translate Z to the desired slice index.
+            matrix.SetElement(2, 3, z_idx) 
+        
+        elif view_name == 'coronal':
+            # Coronal (Y-slice). Map X -> X, Z -> -Y, Y -> Z.
+            matrix.SetElement(1, 1, 0)
+            matrix.SetElement(1, 2, -1)  # Z-axis becomes the negative Y-axis of the slice
+            matrix.SetElement(2, 1, 1)   # Y-axis becomes the Z-axis of the slice
+            matrix.SetElement(2, 3, y_idx) # Translate along the new Z-axis (which was Y)
+            
+        elif view_name == 'sagittal':
+            # Sagittal (X-slice). Map Y -> X, X -> -Y, Z -> Z.
+            matrix.SetElement(0, 0, 0)
+            matrix.SetElement(0, 1, 1)   # Y-axis becomes the X-axis of the slice
+            matrix.SetElement(1, 0, -1)  # X-axis becomes the negative Y-axis of the slice
+            matrix.SetElement(2, 3, x_idx) # Translate along the new Z-axis (which was X)
+
+        # 4. Apply Reslice Filter to MRI Data
+        reslice_mri = vtk.vtkImageReslice()
+        reslice_mri.SetInputConnection(importer.GetOutputPort())
+        reslice_mri.SetResliceAxes(matrix)
+        reslice_mri.SetOutputDimensionality(2) # Ensures we get a 2D plane
+        reslice_mri.Update()
+        
+        # 5. Add MRI Slice Actor
+        slice_actor = vtk.vtkImageActor()
+        slice_actor.GetMapper().SetInputConnection(reslice_mri.GetOutputPort())
+        renderer.AddActor(slice_actor)
+        
+        # 6. Handle Mask Overlay
+        if self.mask_data is not None:
+            # Re-run the reslice with the mask data
+            mask_importer = vtk.vtkImageImport()
+            mask_data_contiguous = self.mask_data.copy()
+            mask_importer.SetImportVoidPointer(mask_data_contiguous, mask_data_contiguous.nbytes)
+            mask_importer.SetDataScalarTypeToUnsignedShort()
+            mask_importer.SetNumberOfScalarComponents(1)
+            mask_importer.SetDataExtent(importer.GetDataExtent())
+            mask_importer.SetWholeExtent(importer.GetDataExtent())
+            mask_importer.Update()
+            
+            # Apply Reslice Filter to Mask Data (using the same matrix)
+            reslice_mask = vtk.vtkImageReslice()
+            reslice_mask.SetInputConnection(mask_importer.GetOutputPort())
+            reslice_mask.SetResliceAxes(matrix)
+            reslice_mask.SetOutputDimensionality(2)
+            reslice_mask.Update()
+            
+            # Color the mask data
+            mask_lut = vtk.vtkLookupTable()
+            mask_lut.SetNumberOfTableValues(256)
+            mask_lut.Build()
+            mask_lut.SetTableValue(1, 1.0, 0.0, 0.0, 0.6)
+            mask_lut.SetTableValue(2, 0.0, 1.0, 0.0, 0.6)
+            mask_lut.SetTableValue(3, 0.0, 0.0, 1.0, 0.6)
+
+            mask_colorer = vtk.vtkImageMapToColors()
+            mask_colorer.SetInputConnection(reslice_mask.GetOutputPort()) # Use reslice output
+            mask_colorer.SetLookupTable(mask_lut)
+            mask_colorer.PassAlphaToOutputOn()
+            
+            # Add Mask Actor (using vtkImageSlice for alpha blending)
+            mask_mapper = vtk.vtkImageSliceMapper()
+            mask_mapper.SetInputConnection(mask_colorer.GetOutputPort())
+            mask_actor = vtk.vtkImageSlice()
+            mask_actor.SetMapper(mask_mapper)
+            renderer.AddActor(mask_actor)
+
+
+        # 7. Finalize Camera and Snapshot
+        renderer.ResetCamera()
+        renderer.Render()
+        
+        w2if = vtk.vtkWindowToImageFilter()
+        w2if.SetInput(renderWindow)
+        w2if.Update()
+
+        temp_path = os.path.join(tempfile.gettempdir(), f"slice_{view_name}.png")
+        writer = vtk.vtkPNGWriter()
+        writer.SetFileName(temp_path)
+        writer.SetInputConnection(w2if.GetOutputPort())
+        writer.Write()
+        
+        # Clean up
+        renderer.RemoveAllViewProps()
+        renderWindow.Finalize()
+        del renderWindow, renderer, w2if, writer
+        
+        return temp_path
+
+    def _create_3d_snapshot(self, label_value=None, angle_index=0, size=(400, 400)):
+        """
+        Generates a 3D snapshot from a specific angle.
+        label_value=None renders all labels.
+        angle_index (0, 1, 2) corresponds to a different camera view.
+        Returns the path to the saved PNG image.
+        """
+        if self.mask_data is None: return None
+
+        # 1. Setup Off-Screen Renderer
+        renderWindow = vtk.vtkRenderWindow()
+        renderWindow.SetOffScreenRendering(1)
+        renderWindow.SetSize(size)
+        renderer = vtk.vtkRenderer()
+        renderWindow.AddRenderer(renderer)
+        renderer.SetBackground(0.0, 0.0, 0.0) # Black background
+
+        # 2. Filter Mask Data for Label (if specified)
+        if label_value is not None:
+            # Create a binary array where only the target label is 1
+            data_to_render = (self.mask_data == label_value).astype(np.float32)
+        else:
+            # Render all labels (using the mask data itself, converted to float)
+            data_to_render = self.mask_data.astype(np.float32)
+            
+        # --- FIX: Ensure Contiguity for the data being passed to Marching Cubes ---
+        data_to_render_contiguous = data_to_render.copy()
+        # --------------------------------------------------------------------------
+
+        # 3. VTK Pipeline (Marching Cubes for Surface)
+        importer = vtk.vtkImageImport()
+        importer.SetDataScalarTypeToFloat()
+        importer.SetNumberOfScalarComponents(1)
+        
+        # Use the contiguous copy
+        importer.SetImportVoidPointer(data_to_render_contiguous, data_to_render_contiguous.nbytes)
+        
+        importer.SetDataExtent(0, data_to_render.shape[2] - 1, 
+                               0, data_to_render.shape[1] - 1, 
+                               0, data_to_render.shape[0] - 1)
+        importer.SetWholeExtent(importer.GetDataExtent())
+        importer.Update()
+        
+        # ... (rest of the VTK pipeline remains the same) ...
+        
+        # Use Marching Cubes to extract the surface
+        mc = vtk.vtkMarchingCubes()
+        mc.SetInputConnection(importer.GetOutputPort())
+        mc.SetValue(0, 0.5) # Isosurface at 0.5 (separating 0 from 1)
+        
+        # Smoother appearance
+        smoother = vtk.vtkSmoothPolyDataFilter()
+        smoother.SetInputConnection(mc.GetOutputPort())
+        smoother.SetNumberOfIterations(10)
+        
+        # Mapper and Actor
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputConnection(smoother.GetOutputPort())
+        
+        actor = vtk.vtkActor()
+        actor.SetMapper(mapper)
+        
+        # Set color based on label (e.g., green for all/unknown, specific color for individual)
+        if label_value is None:
+            actor.GetProperty().SetColor(0.2, 0.8, 0.2) # Light Green for All
+        else:
+            # Simple color mapping for individual labels
+            hue = (label_value * 0.6180339887) % 1.0 # Golden ratio color
+            color = vtk.vtkColorTransferFunction()
+            color.AddRGBPoint(0.0, 1.0, 1.0, 1.0)
+            color.AddRGBPoint(1.0, hue, 1.0 - hue, 0.5)
+            r, g, b = color.GetColor(1.0)
+            actor.GetProperty().SetColor(r, g, b)
+            
+        renderer.AddActor(actor)
+
+        # 4. Camera Setup
+        renderer.ResetCamera()
+        camera = renderer.GetActiveCamera()
+        
+        # Define 3 distinct viewing angles
+        angles = [
+            (0, 0, 0),        # Front View
+            (45, 15, 0),      # Oblique Top-Right View
+            (90, 0, 0),       # Left Profile View
+        ]
+        
+        az, el, roll = angles[angle_index % 3]
+        camera.Azimuth(az)
+        camera.Elevation(el)
+        camera.Roll(roll)
+        renderer.ResetCameraClippingRange()
+        renderer.Render()
+
+        # 5. Snapshot and Cleanup
+        w2if = vtk.vtkWindowToImageFilter()
+        w2if.SetInput(renderWindow)
+        w2if.Update()
+
+        temp_path = os.path.join(tempfile.gettempdir(), f"3d_{label_value or 'all'}_{angle_index}.png")
+        writer = vtk.vtkPNGWriter()
+        writer.SetFileName(temp_path)
+        writer.SetInputConnection(w2if.GetOutputPort())
+        writer.Write()
+        
+        renderer.RemoveAllViewProps()
+        renderWindow.Finalize()
+        del renderWindow, renderer, w2if, writer
+        
+        return temp_path
 
