@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt5.QtGui import QKeySequence
 from style import MAIN_STYLE
 from vtk.util import numpy_support # Add to imports
+import math
 
 # --- Import Dependencies ---
 
@@ -59,6 +60,99 @@ class MouseWheelInteractorStyle(vtk.vtkInteractorStyleImage):
         self.view_name = view_name
         self.AddObserver(vtk.vtkCommand.MouseWheelForwardEvent, self.on_mouse_wheel_forward)
         self.AddObserver(vtk.vtkCommand.MouseWheelBackwardEvent, self.on_mouse_wheel_backward)
+        self.AddObserver("LeftButtonPressEvent", self.on_left_click)
+
+        self.AutoAdjustCameraClippingRangeOff() 
+        self.SetInteractionModeToImageSlicing()
+
+    def on_left_click(self, obj, event):
+        """
+        Final robust method: converts display coordinates to world coordinates 
+        using the renderer's camera, then converts to voxel indices.
+        """
+        self.OnLeftButtonDown() 
+        
+        if self.parent.mri_data is None:
+            self.OnLeftButtonUp()
+            return
+
+        D, H, W = self.parent.mri_data.shape # Z, Y, X dimensions
+        view_name = self.view_name
+
+        # --- FIX: Explicitly retrieve the renderer associated with this window ---
+        ren_win = self.GetInteractor().GetRenderWindow()
+        if ren_win is None:
+            self.OnLeftButtonUp()
+            return
+            
+        renderer = ren_win.GetRenderers().GetFirstRenderer()
+        if renderer is None:
+            self.OnLeftButtonUp()
+            return
+        # ------------------------------------------------------------------------
+
+        # 1. Get Mouse Position and Convert to World Coordinates
+        display_pos = self.GetInteractor().GetEventPosition()
+        
+        # Convert Display (Pixel) Coords to World Coords
+        # Set Z=0 for the 2D plane
+        renderer.SetDisplayPoint(display_pos[0], display_pos[1], 0)
+        renderer.DisplayToWorld()
+        world_pos = renderer.GetWorldPoint()
+
+        # Check for invalid coordinates
+        if not all(math.isfinite(coord) for coord in world_pos):
+            self.OnLeftButtonUp()
+            return
+            
+        # 2. Map World Coordinates (X, Y, Z) to Voxel Indices (x, y, z)
+        # Start with the current depth slice index for the view (as the fixed slice)
+        new_x = self.parent.current_slice['sagittal']
+        new_y = self.parent.current_slice['coronal']
+        new_z = self.parent.current_slice['axial']
+
+        # Determine which two axes were clicked based on the view
+        # We use math.floor() to reliably convert from float world to integer index
+        if view_name == 'axial':
+            # Axial View shows X (horizontal) and Y (vertical)
+            new_x = int(math.floor(world_pos[0]))
+            new_y = int(math.floor(world_pos[1]))
+            
+        elif view_name == 'coronal':
+            # Coronal View shows X (horizontal) and Z (vertical)
+            new_x = int(math.floor(world_pos[0]))
+            new_z = int(math.floor(world_pos[1]))
+            
+        elif view_name == 'sagittal':
+            # Sagittal View shows Y (horizontal) and Z (vertical)
+            new_y = int(math.floor(world_pos[0]))
+            new_z = int(math.floor(world_pos[1]))
+        
+        # 3. Apply Bounds Checking
+        new_x = max(0, min(new_x, W - 1))
+        new_y = max(0, min(new_y, H - 1))
+        new_z = max(0, min(new_z, D - 1))
+        
+        # 4. CRITICAL FIX: Block Signals to prevent recursion/hang
+        self.parent.sagittal_slider.blockSignals(True)
+        self.parent.coronal_slider.blockSignals(True)
+        self.parent.axial_slider.blockSignals(True)
+
+        # 5. Update the sliders
+        self.parent.sagittal_slider.setValue(new_x)
+        self.parent.coronal_slider.setValue(new_y)
+        self.parent.axial_slider.setValue(new_z)
+
+        # 6. Unblock signals
+        self.parent.sagittal_slider.blockSignals(False)
+        self.parent.coronal_slider.blockSignals(False)
+        self.parent.axial_slider.blockSignals(False)
+
+        # 7. Manually trigger the single update
+        self.parent.update_2d_views()
+        self.parent.statusBar().showMessage(f"Navigated to X:{new_x}, Y:{new_y}, Z:{new_z}")
+        
+        self.OnLeftButtonUp()
     
     def on_mouse_wheel_forward(self, obj, event):
         if self.parent and self.view_name:
@@ -148,7 +242,10 @@ class MRIViewer(QMainWindow):
 
         self.crosshair_actors = {'axial': [], 'sagittal': [], 'coronal': []}
         self.annotations = [] 
-        self.annotation_mode = False 
+        self.annotation_mode = False
+
+
+        #self.crosshair_actors = {}
 
         try:
             print("Building UI...")
@@ -1430,6 +1527,21 @@ class MRIViewer(QMainWindow):
         
         self.volume_mapper = vtk.vtkSmartVolumeMapper()
         self.volume_mapper.SetInputData(self.image_data)
+        self.volume_mapper.SetRequestedRenderModeToGPU() # Request GPU raycasting
+
+        def StartInteraction(obj, event):
+            self.volume_mapper.SetAutoAdjustSampleDistances(1)
+            self.volume_mapper.SetInteractiveUpdateRate(5.0) # Allow dropping frames to keep up
+            
+        # High quality render when stopped
+        def EndInteraction(obj, event):
+            self.volume_mapper.SetAutoAdjustSampleDistances(0)
+            self.vtk_widgets['3d'].GetRenderWindow().Render()
+
+        # Attach to the 3D interactor
+        interactor = self.vtk_widgets['3d'].GetRenderWindow().GetInteractor()
+        interactor.AddObserver("StartInteractionEvent", StartInteraction)
+        interactor.AddObserver("EndInteractionEvent", EndInteraction)
         
         self.volume = vtk.vtkVolume()
         self.volume.SetMapper(self.volume_mapper)
@@ -1584,6 +1696,38 @@ class MRIViewer(QMainWindow):
         self.vtk_widgets['coronal'].GetRenderWindow().Render()
         self._update_crosshair_sync()
     
+    def _update_crosshair_sync(self):
+        """Updates existing crosshair coordinates without recreating actors."""
+        if self.mri_data is None or not self.crosshair_actors: 
+            if self.mri_data is not None: self._init_crosshairs()
+            return
+        
+        D, H, W = self.mri_data.shape
+        x, y, z = self.current_slice['sagittal'], self.current_slice['coronal'], self.current_slice['axial']
+
+        # Update Axial View Crosshair (shows X and Y positions)
+        pts = self.crosshair_actors['axial']['points']
+        # Horizontal line (at y)
+        pts.SetPoint(0, 0, y, 0); pts.SetPoint(1, W, y, 0)
+        # Vertical line (at x)
+        pts.SetPoint(2, x, 0, 0); pts.SetPoint(3, x, H, 0)
+        pts.Modified() # Notify VTK to redraw
+
+        # Update Sagittal View Crosshair (shows Y and Z positions)
+        pts = self.crosshair_actors['sagittal']['points']
+        pts.SetPoint(0, 0, z, 0); pts.SetPoint(1, H, z, 0)
+        pts.SetPoint(2, y, 0, 0); pts.SetPoint(3, y, D, 0)
+        pts.Modified()
+
+        # Update Coronal View Crosshair (shows X and Z positions)
+        pts = self.crosshair_actors['coronal']['points']
+        pts.SetPoint(0, 0, z, 0); pts.SetPoint(1, W, z, 0)
+        pts.SetPoint(2, x, 0, 0); pts.SetPoint(3, x, D, 0)
+        pts.Modified()
+
+        for view in ['axial', 'sagittal', 'coronal']:
+            self.vtk_widgets[view].GetRenderWindow().Render()
+            
     def _create_crosshair_actor(self, x_pos, y_pos, x_max, y_max):
         crosshair_color = (1.0, 1.0, 0.0)
         line_width = 2
