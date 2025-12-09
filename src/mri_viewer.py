@@ -28,7 +28,191 @@ from src.utils.check_imports import *
 from src.utils.mouse_wheel_interactor_style import MouseWheelInteractorStyle
 from src.utils.snapshots import _create_2d_slice_snapshot_mpl, _create_3d_snapshot_pv
 
-# Custom interactor style for mouse wheel navigation
+
+class ExportWorker(QThread):
+    """Background worker to generate PDF exports without blocking UI.
+
+    Runs in a separate thread and emits `finished(success, message)` when done.
+    """
+    finished = pyqtSignal(bool, str)
+
+    def __init__(self, viewer, filepath, volume_results):
+        super().__init__()
+        self.viewer = viewer
+        self.filepath = filepath
+        self.volume_results = volume_results
+
+    def run(self):
+        temp_images = []
+        try:
+            from reportlab.lib.pagesizes import letter
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
+            from reportlab.lib.styles import getSampleStyleSheet
+            from reportlab.lib import colors
+            from PIL import Image as PILImage
+            import matplotlib.pyplot as plt
+            import math, uuid
+
+            document = SimpleDocTemplate(self.filepath, pagesize=letter)
+            styles = getSampleStyleSheet()
+            story = []
+
+            story.append(Paragraph("NeuroView MRI Volume Report", styles['Title']))
+            story.append(Paragraph(f"<b>Source File:</b> {self.viewer.fileName or 'N/A'}", styles['Normal']))
+            story.append(Paragraph(f"<b>Mask Configuration:</b> {self.viewer.label_config_path}", styles['Normal']))
+            story.append(Spacer(1, 12))
+
+            # 2D slices (central thumbnails)
+            story.append(Paragraph("<b>2D Slices with Segmentation Mask Overlay</b>", styles['Heading2']))
+            central_thumbs = []
+            montages = []
+
+            def _make_montage(items, thumb_w=300, thumb_h=300, cols=4, max_slices=15):
+                # Sample items if too many
+                n = len(items)
+                if n == 0:
+                    return None
+                if n > max_slices:
+                    indices = np.linspace(0, n - 1, max_slices, dtype=int)
+                    items = [items[i] for i in indices]
+
+                imgs = []
+                for it in items:
+                    try:
+                        if isinstance(it, str):
+                            im = PILImage.open(it).convert('RGB')
+                        else:
+                            im = PILImage.fromarray(it)
+                        im.thumbnail((thumb_w, thumb_h), PILImage.LANCZOS)
+                        bg = PILImage.new('RGB', (thumb_w, thumb_h), (255, 255, 255))
+                        offset = ((thumb_w - im.width) // 2, (thumb_h - im.height) // 2)
+                        bg.paste(im, offset)
+                        imgs.append(bg)
+                    except Exception:
+                        continue
+
+                if not imgs:
+                    return None
+
+                cols = min(cols, len(imgs))
+                rows = math.ceil(len(imgs) / cols)
+                montage = PILImage.new('RGB', (cols * thumb_w, rows * thumb_h), (255, 255, 255))
+                for idx, im in enumerate(imgs):
+                    r = idx // cols
+                    c = idx % cols
+                    montage.paste(im, (c * thumb_w, r * thumb_h))
+
+                temp_path = os.path.join(tempfile.gettempdir(), f"montage_{uuid.uuid4().hex}.png")
+                montage.save(temp_path)
+                return temp_path
+
+            for view in ['axial', 'coronal', 'sagittal']:
+                # central thumbnail
+                central = self.viewer._create_2d_slice_snapshot(view, size=(200, 200))
+                if isinstance(central, list):
+                    pick = central[len(central) // 2]
+                    if isinstance(pick, np.ndarray):
+                        tmp = os.path.join(tempfile.gettempdir(), f"slice_tmp_{view}.png")
+                        plt.imsave(tmp, pick)
+                        temp_images.append(tmp)
+                        central_thumbs.append(Image(tmp, width=150, height=150))
+                    else:
+                        temp_images.append(pick)
+                        central_thumbs.append(Image(pick, width=150, height=150))
+                elif isinstance(central, np.ndarray):
+                    tmp = os.path.join(tempfile.gettempdir(), f"slice_tmp_{view}.png")
+                    plt.imsave(tmp, central)
+                    temp_images.append(tmp)
+                    central_thumbs.append(Image(tmp, width=150, height=150))
+                elif central:
+                    temp_images.append(central)
+                    central_thumbs.append(Image(central, width=150, height=150))
+
+                # all-slices montage (prefer file paths)
+                try:
+                    all_res = _create_2d_slice_snapshot_mpl(self.viewer, view, size=(400, 400), all_slices=True, return_arrays=False)
+                except Exception:
+                    all_res = None
+
+                if all_res:
+                    if isinstance(all_res, list):
+                        montage_path = _make_montage(all_res, thumb_w=300, thumb_h=300, cols=4, max_slices=15)
+                        if montage_path:
+                            temp_images.append(montage_path)
+                            montages.append((view, Image(montage_path, width=400, height=400)))
+                    elif isinstance(all_res, np.ndarray):
+                        tmp = os.path.join(tempfile.gettempdir(), f"slice_all_{view}.png")
+                        plt.imsave(tmp, all_res)
+                        temp_images.append(tmp)
+                        montages.append((view, Image(tmp, width=400, height=400)))
+
+            if central_thumbs:
+                story.append(Table([[Paragraph("Axial", styles['Code']), Paragraph("Coronal", styles['Code']), Paragraph("Sagittal", styles['Code'])], central_thumbs]))
+                story.append(Spacer(1, 12))
+
+            if montages:
+                story.append(Paragraph("<b>All Slices Montages (per axis)</b>", styles['Heading2']))
+                for view_name, img_obj in montages:
+                    story.append(Paragraph(view_name.capitalize(), styles['Heading3']))
+                    story.append(Table([[img_obj]]))
+                    story.append(Spacer(1, 12))
+
+            # 3D views and tables (reuse viewer logic) -- keep same as before
+            if self.viewer.mask_data is not None:
+                story.append(Paragraph("<b>3D Model: All Segmented Labels</b>", styles['Heading2']))
+                all_3d_images = []
+                for i in range(3):
+                    path = self.viewer._create_3d_snapshot(label_value=None, angle_index=i, size=(200, 200))
+                    if path:
+                        temp_images.append(path)
+                        all_3d_images.append(Image(path, width=150, height=150))
+
+                if all_3d_images:
+                    story.append(Table([all_3d_images]))
+                    story.append(Spacer(1, 12))
+
+            story.append(Paragraph("<b>Volumetric Analysis Table</b>", styles['Heading2']))
+            table_data = [["Label Name", "Volume (cm³)", "Volume (mm³)"]]
+            for name, vol_cm3 in self.volume_results.items():
+                vol_mm3 = vol_cm3 * 1000.0
+                table_data.append([name, f"{vol_cm3:.3f}", f"{vol_mm3:.1f}"])
+
+            table = Table(table_data)
+            table.setStyle(TableStyle([('BACKGROUND', (0, 0), (-1, 0), colors.grey), ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke), ('ALIGN', (0, 0), (-1, -1), 'LEFT'), ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'), ('BOTTOMPADDING', (0, 0), (-1, 0), 12), ('BACKGROUND', (0, 1), (-1, -1), colors.beige), ('GRID', (0, 0), (-1, -1), 1, colors.black)]))
+            story.append(table)
+            story.append(Spacer(1, 12))
+
+            if self.viewer.mask_data is not None and len(self.volume_results) > 0:
+                story.append(Paragraph("<b>3D Models: Individual Labels</b>", styles['Heading2']))
+                for label_val in self.viewer.label_map.keys():
+                    if label_val in [0] or not (self.viewer.mask_data == label_val).any():
+                        continue
+                    label_name = self.viewer.label_map.get(label_val, f"Label_{label_val}")
+                    story.append(Paragraph(f"<b>{label_name}</b>", styles['Heading3']))
+                    individual_3d_images = []
+                    for i in range(3):
+                        path = self.viewer._create_3d_snapshot(label_val, angle_index=i, size=(150, 150))
+                        if path:
+                            temp_images.append(path)
+                            individual_3d_images.append(Image(path, width=100, height=100))
+                    if individual_3d_images:
+                        story.append(Table([individual_3d_images]))
+                        story.append(Spacer(1, 6))
+
+            document.build(story)
+            self.finished.emit(True, f"Report successfully exported to {self.filepath}")
+
+        except ImportError as ie:
+            self.finished.emit(False, "PDF Library (reportlab) or Pillow not found. Please install required packages.")
+        except Exception as e:
+            self.finished.emit(False, f"An error occurred during PDF generation: {e}")
+        finally:
+            for path in temp_images:
+                if os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
 
 class MRIViewer(QMainWindow):
     def __init__(self):
@@ -117,10 +301,7 @@ class MRIViewer(QMainWindow):
             self.statusBar().showMessage(f"Label config file not found. Using default empty map.")
             self.label_map = {}
             return False
-        except Exception as e:
-            QMessageBox.critical(self, "Config Error", f"Failed to load label config: {e}")
-            self.label_map = {}
-            return False
+        
 
     def save_label_config(self):
         """Saves the current label map to the persistent JSON file."""
@@ -210,229 +391,74 @@ class MRIViewer(QMainWindow):
         filepath, _ = QFileDialog.getSaveFileName(
             self, "Export Volume Report", default_filename, "PDF Files (*.pdf)"
         )
-        
-        if not filepath: return
-        self.statusBar().showMessage(f"Generating PDF report: {filepath}...")
 
-        # List to hold temporary image paths for cleanup
-        temp_images = []
-        
+        # If user canceled the save dialog, abort cleanly
+        if not filepath:
+            try:
+                self.btn_export_report.setEnabled(True)
+            except Exception:
+                pass
+            self.statusBar().showMessage("Export canceled")
+            return
+
+        # Run the export (including montage generation) in a background thread
+        # to avoid blocking the UI. The ExportWorker performs the heavy work and
+        # emits a finished signal when done. Keep a reference on self to avoid
+        # the QThread object being garbage-collected while running.
         try:
-            # --- START PDF GENERATION (ReportLab Structure) ---
-            from reportlab.lib.pagesizes import letter
-            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
-            from reportlab.lib.styles import getSampleStyleSheet
-            from reportlab.lib import colors
-
-            document = SimpleDocTemplate(filepath, pagesize=letter)
-            styles = getSampleStyleSheet()
-            story = []
-
-            # 1. Title and Metadata
-            story.append(Paragraph("NeuroView MRI Volume Report", styles['Title']))
-            story.append(Paragraph(f"<b>Source File:</b> {self.fileName or 'N/A'}", styles['Normal']))
-            story.append(Paragraph(f"<b>Mask Configuration:</b> {self.label_config_path}", styles['Normal']))
-            story.append(Spacer(1, 12))
-
-            # 2. 2D Slices with Mask Overlay
-            story.append(Paragraph("<b>2D Slices with Segmentation Mask Overlay</b>", styles['Heading2']))
-
-            # We'll collect the central (single) small thumbnails first, then
-            # optionally include larger montages for full-slice exports.
-            central_thumbs = []
-            montages = []
-
-            # Local montage builder (Pillow). Returns path or None on failure.
-            def _make_montage(items, thumb_w=300, thumb_h=300, cols=4):
-                try:
-                    from PIL import Image as PILImage
-                except Exception:
-                    return None
-                import math, uuid
-
-                imgs = []
-                for it in items:
-                    try:
-                        if isinstance(it, str):
-                            im = PILImage.open(it).convert('RGB')
-                        else:
-                            # Assume numpy array
-                            im = PILImage.fromarray(it)
-                        # Preserve aspect ratio: create a thumbnail that fits
-                        # within (thumb_w, thumb_h) and paste centered into a
-                        # background box of that size.
-                        im.thumbnail((thumb_w, thumb_h), PILImage.LANCZOS)
-                        bg = PILImage.new('RGB', (thumb_w, thumb_h), (255, 255, 255))
-                        offset = ((thumb_w - im.width) // 2, (thumb_h - im.height) // 2)
-                        bg.paste(im, offset)
-                        imgs.append(bg)
-                    except Exception:
-                        continue
-
-                if not imgs:
-                    return None
-
-                n = len(imgs)
-                cols = min(cols, n)
-                rows = math.ceil(n / cols)
-                montage = PILImage.new('RGB', (cols * thumb_w, rows * thumb_h), (255, 255, 255))
-                for idx, im in enumerate(imgs):
-                    r = idx // cols
-                    c = idx % cols
-                    montage.paste(im, (c * thumb_w, r * thumb_h))
-
-                temp_path = os.path.join(tempfile.gettempdir(), f"montage_{uuid.uuid4().hex}.png")
-                montage.save(temp_path)
-                return temp_path
-
-            for view in ['axial', 'coronal', 'sagittal']:
-                # 1) Central small thumbnail (keep existing behavior)
-                central = self._create_2d_slice_snapshot(view, size=(200, 200))
-                # Be defensive: if the snapshot function returns a list or array,
-                # pick the central element or save the array to a temp file.
-                if isinstance(central, list):
-                    pick = central[len(central) // 2]
-                    if isinstance(pick, np.ndarray):
-                        tmp = os.path.join(tempfile.gettempdir(), f"slice_tmp_{view}.png")
-                        plt.imsave(tmp, pick)
-                        temp_images.append(tmp)
-                        central_thumbs.append(Image(tmp, width=150, height=150))
-                    else:
-                        temp_images.append(pick)
-                        central_thumbs.append(Image(pick, width=150, height=150))
-                elif isinstance(central, np.ndarray):
-                    tmp = os.path.join(tempfile.gettempdir(), f"slice_tmp_{view}.png")
-                    plt.imsave(tmp, central)
-                    temp_images.append(tmp)
-                    central_thumbs.append(Image(tmp, width=150, height=150))
-                elif central:
-                    temp_images.append(central)
-                    central_thumbs.append(Image(central, width=150, height=150))
-
-                # 2) All-slices (bigger montage). Use the mpl helper directly to
-                # request all slices; prefer file paths but accept arrays.
-                try:
-                    all_res = _create_2d_slice_snapshot_mpl(self, view, size=(400, 400), all_slices=True, return_arrays=False)
-                except Exception:
-                    all_res = None
-
-                if all_res:
-                    if isinstance(all_res, list):
-                        montage_path = _make_montage(all_res, thumb_w=300, thumb_h=300, cols=4)
-                        if montage_path:
-                            temp_images.append(montage_path)
-                            montages.append((view, Image(montage_path, width=400, height=400)))
-                        else:
-                            # Fallback to central if montage creation failed
-                            pass
-
-                    elif isinstance(all_res, np.ndarray):
-                        # Save array to temp file and create montage with single image
-                        tmp = os.path.join(tempfile.gettempdir(), f"slice_all_{view}.png")
-                        plt.imsave(tmp, all_res)
-                        temp_images.append(tmp)
-                        montages.append((view, Image(tmp, width=400, height=400)))
-
-                    else:
-                        # Single path returned (unlikely), include as montage
-                        temp_images.append(all_res)
-                        montages.append((view, Image(all_res, width=400, height=400)))
-
-            # Add central thumbnails table (Axial / Coronal / Sagittal)
-            if central_thumbs:
-                story.append(Table([[
-                    Paragraph("Axial", styles['Code']),
-                    Paragraph("Coronal", styles['Code']),
-                    Paragraph("Sagittal", styles['Code'])
-                ], central_thumbs]))
-                story.append(Spacer(1, 12))
-
-            # Add larger per-axis montages (each on its own row)
-            if montages:
-                story.append(Paragraph("<b>All Slices Montages (per axis)</b>", styles['Heading2']))
-                for view_name, img_obj in montages:
-                    story.append(Paragraph(view_name.capitalize(), styles['Heading3']))
-                    story.append(Table([[img_obj]]))
-                    story.append(Spacer(1, 12))
-
-            # 3. 3D Views - All Labels
-            if self.mask_data is not None:
-                story.append(Paragraph("<b>3D Model: All Segmented Labels</b>", styles['Heading2']))
-                all_3d_images = []
-                for i in range(3):
-                    path = self._create_3d_snapshot(label_value=None, angle_index=i, size=(200, 200))
-                    if path:
-                        temp_images.append(path)
-                        all_3d_images.append(Image(path, width=150, height=150))
-                
-                if all_3d_images:
-                    story.append(Table([all_3d_images]))
-                    story.append(Spacer(1, 12))
-
-
-            # 4. Volume Data Table
-            story.append(Paragraph("<b>Volumetric Analysis Table</b>", styles['Heading2']))
-            table_data = [["Label Name", "Volume (cm³)", "Volume (mm³)"]]
-            for name, vol_cm3 in volume_results.items():
-                vol_mm3 = vol_cm3 * 1000.0
-                table_data.append([
-                    name,
-                    f"{vol_cm3:.3f}",
-                    f"{vol_mm3:.1f}"
-                ])
-
-            table = Table(table_data)
-            table.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
-                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
-                ('GRID', (0, 0), (-1, -1), 1, colors.black)
-            ]))
-            story.append(table)
-            story.append(Spacer(1, 12))
-            
-            # 5. 3D Views - Individual Labels
-            if self.mask_data is not None and len(volume_results) > 0:
-                story.append(Paragraph("<b>3D Models: Individual Labels</b>", styles['Heading2']))
-                
-                for label_val in self.label_map.keys():
-                    if label_val in [0] or not (self.mask_data == label_val).any():
-                        continue # Skip background or non-existent labels
-                    
-                    label_name = self.label_map.get(label_val, f"Label_{label_val}")
-                    
-                    story.append(Paragraph(f"<b>{label_name}</b>", styles['Heading3']))
-                    
-                    individual_3d_images = []
-                    for i in range(3):
-                        path = self._create_3d_snapshot(label_val, angle_index=i, size=(150, 150))
-                        if path:
-                            temp_images.append(path)
-                            individual_3d_images.append(Image(path, width=100, height=100))
-                    
-                    if individual_3d_images:
-                        story.append(Table([individual_3d_images]))
-                        story.append(Spacer(1, 6))
-
-            
-            document.build(story)
-            self.statusBar().showMessage(f"Report successfully exported to {filepath}")
-
-        except ImportError:
-            QMessageBox.critical(self, "Export Error", "PDF Library (reportlab) not found. Please install it.")
+            worker = ExportWorker(self, filepath, volume_results)
         except Exception as e:
-            QMessageBox.critical(self, "Export Error", f"An error occurred during PDF generation: {e}")
-        finally:
-            # --- Cleanup Temporary Files ---
-            for path in temp_images:
-                if os.path.exists(path):
-                    try:
-                        os.remove(path)
-                    except OSError as e:
-                        print(f"Warning: Could not delete temp file {path}: {e}")
+            QMessageBox.critical(self, "Export Error", f"Failed to initialize export worker: {e}")
+            return
+
+        # Store worker reference so Python/GIL doesn't garbage-collect it
+        self._export_worker = worker
+
+        # Disable export button while running
+        try:
+            self.btn_export_report.setEnabled(False)
+        except Exception:
+            pass
+
+        def _on_finished(success, message):
+            try:
+                self.btn_export_report.setEnabled(True)
+            except Exception:
+                pass
+            # Clean up reference and schedule deletion
+            try:
+                if hasattr(self, '_export_worker') and self._export_worker is worker:
+                    # Give the thread object a chance to be deleted later
+                    self._export_worker.deleteLater()
+                    self._export_worker = None
+            except Exception:
+                pass
+
+            if success:
+                self.statusBar().showMessage(message)
+                QMessageBox.information(self, "Export Success", message)
+            else:
+                self.statusBar().showMessage("Export failed.")
+                QMessageBox.critical(self, "Export Error", message)
+
+        worker.finished.connect(_on_finished)
+
+        try:
+            worker.start()
+        except Exception as e:
+            # Ensure button is re-enabled and reference cleaned
+            try:
+                self.btn_export_report.setEnabled(True)
+            except Exception:
+                pass
+            try:
+                if hasattr(self, '_export_worker'):
+                    self._export_worker = None
+            except Exception:
+                pass
+            QMessageBox.critical(self, "Export Error", f"Failed to start export worker: {e}")
+            return
+        
     
     def build_ui(self):
         central_widget = QWidget()
@@ -454,6 +480,19 @@ class MRIViewer(QMainWindow):
         
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("Ready")
+
+    def closeEvent(self, event):
+        """Ensure background export worker finishes before closing to avoid
+        'QThread: Destroyed while thread is still running' crashes."""
+        worker = getattr(self, '_export_worker', None)
+        if worker is not None and worker.isRunning():
+            # Inform user and wait briefly for the thread to finish
+            self.statusBar().showMessage("Waiting for export to finish...")
+            # Wait up to 10 seconds
+            worker.wait(10000)
+            if worker.isRunning():
+                QMessageBox.warning(self, "Close Warning", "Export is still running. Close will proceed and terminate the worker.")
+        super().closeEvent(event)
     
     def build_left_panel(self):
         panel = QWidget()
