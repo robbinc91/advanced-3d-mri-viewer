@@ -26,6 +26,7 @@ import vtk # Assuming this is already imported
 # --- Import Dependencies ---
 from src.utils.check_imports import *
 from src.utils.mouse_wheel_interactor_style import MouseWheelInteractorStyle
+from src.utils.snapshots import _create_2d_slice_snapshot_mpl
 
 # Custom interactor style for mouse wheel navigation
 
@@ -1950,135 +1951,7 @@ class MRIViewer(QMainWindow):
             'sagittal': W // 2,
         }
 
-    def _create_2d_slice_snapshot(self, view_name, size=(300, 300)):
-        """
-        Generates a 2D snapshot of the specified central slice with mask overlay
-        using vtkImageReslice to ensure orientation is correctly handled.
-        Returns the path to the saved PNG image.
-        """
-        if self.mri_data is None: return None
-
-        indices = self._get_representative_slice_index()
-        z_idx, y_idx, x_idx = indices['axial'], indices['coronal'], indices['sagittal']
-        
-        # 1. Setup Off-Screen Renderer
-        renderWindow = vtk.vtkRenderWindow()
-        renderWindow.SetOffScreenRendering(1)
-        renderWindow.SetSize(size)
-        renderer = vtk.vtkRenderer()
-        renderWindow.AddRenderer(renderer)
-        
-        # 2. Base Importer for MRI Data
-        importer = vtk.vtkImageImport()
-        mri_data_contiguous = self.mri_data.copy()
-        importer.SetImportVoidPointer(mri_data_contiguous, mri_data_contiguous.nbytes)
-        importer.SetDataScalarTypeToFloat()
-        importer.SetNumberOfScalarComponents(1)
-        # Note: Assuming VTK input order X, Y, Z (W, H, D in numpy shape)
-        importer.SetDataExtent(0, self.mri_data.shape[2] - 1, 
-                               0, self.mri_data.shape[1] - 1, 
-                               0, self.mri_data.shape[0] - 1)
-        importer.SetWholeExtent(importer.GetDataExtent())
-        importer.Update()
-        
-        # 3. Setup Reslice Transformation Matrix
-        # This matrix defines the coordinate system of the slice plane.
-        matrix = vtk.vtkMatrix4x4()
-        matrix.Identity() 
-
-        # The reslicer extracts a single slice from the new Z=0 plane (default).
-        # We manipulate the matrix's translation component (column 3) to select the desired slice index.
-        
-        if view_name == 'axial':
-            # Axial (Z-slice). Keep X, Y, Z axes, just translate Z to the desired slice index.
-            matrix.SetElement(2, 3, z_idx) 
-        
-        elif view_name == 'coronal':
-            # Coronal (Y-slice). Map X -> X, Z -> -Y, Y -> Z.
-            matrix.SetElement(1, 1, 0)
-            matrix.SetElement(1, 2, -1)  # Z-axis becomes the negative Y-axis of the slice
-            matrix.SetElement(2, 1, 1)   # Y-axis becomes the Z-axis of the slice
-            matrix.SetElement(2, 3, y_idx) # Translate along the new Z-axis (which was Y)
-            
-        elif view_name == 'sagittal':
-            # Sagittal (X-slice). Map Y -> X, X -> -Y, Z -> Z.
-            matrix.SetElement(0, 0, 0)
-            matrix.SetElement(0, 1, 1)   # Y-axis becomes the X-axis of the slice
-            matrix.SetElement(1, 0, -1)  # X-axis becomes the negative Y-axis of the slice
-            matrix.SetElement(2, 3, x_idx) # Translate along the new Z-axis (which was X)
-
-        # 4. Apply Reslice Filter to MRI Data
-        reslice_mri = vtk.vtkImageReslice()
-        reslice_mri.SetInputConnection(importer.GetOutputPort())
-        reslice_mri.SetResliceAxes(matrix)
-        reslice_mri.SetOutputDimensionality(2) # Ensures we get a 2D plane
-        reslice_mri.Update()
-        
-        # 5. Add MRI Slice Actor
-        slice_actor = vtk.vtkImageActor()
-        slice_actor.GetMapper().SetInputConnection(reslice_mri.GetOutputPort())
-        renderer.AddActor(slice_actor)
-        
-        # 6. Handle Mask Overlay
-        if self.mask_data is not None:
-            # Re-run the reslice with the mask data
-            mask_importer = vtk.vtkImageImport()
-            mask_data_contiguous = self.mask_data.copy()
-            mask_importer.SetImportVoidPointer(mask_data_contiguous, mask_data_contiguous.nbytes)
-            mask_importer.SetDataScalarTypeToUnsignedShort()
-            mask_importer.SetNumberOfScalarComponents(1)
-            mask_importer.SetDataExtent(importer.GetDataExtent())
-            mask_importer.SetWholeExtent(importer.GetDataExtent())
-            mask_importer.Update()
-            
-            # Apply Reslice Filter to Mask Data (using the same matrix)
-            reslice_mask = vtk.vtkImageReslice()
-            reslice_mask.SetInputConnection(mask_importer.GetOutputPort())
-            reslice_mask.SetResliceAxes(matrix)
-            reslice_mask.SetOutputDimensionality(2)
-            reslice_mask.Update()
-            
-            # Color the mask data
-            mask_lut = vtk.vtkLookupTable()
-            mask_lut.SetNumberOfTableValues(256)
-            mask_lut.Build()
-            mask_lut.SetTableValue(1, 1.0, 0.0, 0.0, 0.6)
-            mask_lut.SetTableValue(2, 0.0, 1.0, 0.0, 0.6)
-            mask_lut.SetTableValue(3, 0.0, 0.0, 1.0, 0.6)
-
-            mask_colorer = vtk.vtkImageMapToColors()
-            mask_colorer.SetInputConnection(reslice_mask.GetOutputPort()) # Use reslice output
-            mask_colorer.SetLookupTable(mask_lut)
-            mask_colorer.PassAlphaToOutputOn()
-            
-            # Add Mask Actor (using vtkImageSlice for alpha blending)
-            mask_mapper = vtk.vtkImageSliceMapper()
-            mask_mapper.SetInputConnection(mask_colorer.GetOutputPort())
-            mask_actor = vtk.vtkImageSlice()
-            mask_actor.SetMapper(mask_mapper)
-            renderer.AddActor(mask_actor)
-
-
-        # 7. Finalize Camera and Snapshot
-        renderer.ResetCamera()
-        renderer.Render()
-        
-        w2if = vtk.vtkWindowToImageFilter()
-        w2if.SetInput(renderWindow)
-        w2if.Update()
-
-        temp_path = os.path.join(tempfile.gettempdir(), f"slice_{view_name}.png")
-        writer = vtk.vtkPNGWriter()
-        writer.SetFileName(temp_path)
-        writer.SetInputConnection(w2if.GetOutputPort())
-        writer.Write()
-        
-        # Clean up
-        renderer.RemoveAllViewProps()
-        renderWindow.Finalize()
-        del renderWindow, renderer, w2if, writer
-        
-        return temp_path
+    _create_2d_slice_snapshot = _create_2d_slice_snapshot_mpl
 
     def _create_3d_snapshot(self, label_value=None, angle_index=0, size=(400, 400)):
         """
