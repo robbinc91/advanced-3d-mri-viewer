@@ -23,6 +23,7 @@ import traceback
 import tempfile
 import os
 import vtk # Assuming this is already imported
+import threading
 # --- Import Dependencies ---
 from src.utils.check_imports import *
 from src.utils.mouse_wheel_interactor_style import MouseWheelInteractorStyle
@@ -35,12 +36,14 @@ class ExportWorker(QThread):
     Runs in a separate thread and emits `finished(success, message)` when done.
     """
     finished = pyqtSignal(bool, str)
+    progress = pyqtSignal(int, str)
 
     def __init__(self, viewer, filepath, volume_results):
         super().__init__()
         self.viewer = viewer
         self.filepath = filepath
         self.volume_results = volume_results
+        self._cancel_event = threading.Event()
 
     def run(self):
         temp_images = []
@@ -107,6 +110,9 @@ class ExportWorker(QThread):
                 return temp_path
 
             for view in ['axial', 'coronal', 'sagittal']:
+                if self._cancel_event.is_set():
+                    self.finished.emit(False, "Export canceled by user")
+                    return
                 # central thumbnail
                 central = self.viewer._create_2d_slice_snapshot(view, size=(200, 200))
                 if isinstance(central, list):
@@ -135,6 +141,11 @@ class ExportWorker(QThread):
                     all_res = None
 
                 if all_res:
+                    # emit progress after collecting all-slices result for this axis
+                    try:
+                        self.progress.emit(20, f"Built all-slices for {view}")
+                    except Exception:
+                        pass
                     if isinstance(all_res, list):
                         montage_path = _make_montage(all_res, thumb_w=300, thumb_h=300, cols=4, max_slices=15)
                         if montage_path:
@@ -147,6 +158,10 @@ class ExportWorker(QThread):
                         montages.append((view, Image(tmp, width=400, height=400)))
 
             if central_thumbs:
+                try:
+                    self.progress.emit(60, "Added central thumbnails")
+                except Exception:
+                    pass
                 story.append(Table([[Paragraph("Axial", styles['Code']), Paragraph("Coronal", styles['Code']), Paragraph("Sagittal", styles['Code'])], central_thumbs]))
                 story.append(Spacer(1, 12))
 
@@ -170,6 +185,10 @@ class ExportWorker(QThread):
                 if all_3d_images:
                     story.append(Table([all_3d_images]))
                     story.append(Spacer(1, 12))
+                    try:
+                        self.progress.emit(75, "Rendered 3D overview images")
+                    except Exception:
+                        pass
 
             story.append(Paragraph("<b>Volumetric Analysis Table</b>", styles['Heading2']))
             table_data = [["Label Name", "Volume (cm³)", "Volume (mm³)"]]
@@ -198,8 +217,16 @@ class ExportWorker(QThread):
                     if individual_3d_images:
                         story.append(Table([individual_3d_images]))
                         story.append(Spacer(1, 6))
+                        try:
+                            self.progress.emit(90, f"Added 3D images for {label_name}")
+                        except Exception:
+                            pass
 
+            if self._cancel_event.is_set():
+                self.finished.emit(False, "Export canceled by user")
+                return
             document.build(story)
+            self.progress.emit(100, "Finalizing PDF")
             self.finished.emit(True, f"Report successfully exported to {self.filepath}")
 
         except ImportError as ie:
@@ -423,6 +450,7 @@ class MRIViewer(QMainWindow):
         def _on_finished(success, message):
             try:
                 self.btn_export_report.setEnabled(True)
+                self.btn_cancel_export.setEnabled(False)
             except Exception:
                 pass
             # Clean up reference and schedule deletion
@@ -441,7 +469,19 @@ class MRIViewer(QMainWindow):
                 self.statusBar().showMessage("Export failed.")
                 QMessageBox.critical(self, "Export Error", message)
 
+        # Ensure cancel button is disabled if worker already finished immediately
+        try:
+            if not getattr(self, '_export_worker', None) or not getattr(self, '_export_worker', None).isRunning():
+                self.btn_cancel_export.setEnabled(False)
+        except Exception:
+            pass
+
         worker.finished.connect(_on_finished)
+        # connect progress updates to status bar
+        try:
+            worker.progress.connect(lambda p, msg: self.statusBar().showMessage(f"Export: {p}% - {msg}"))
+        except Exception:
+            pass
 
         try:
             worker.start()
@@ -458,7 +498,27 @@ class MRIViewer(QMainWindow):
                 pass
             QMessageBox.critical(self, "Export Error", f"Failed to start export worker: {e}")
             return
+        # enable cancel button once worker started
+        try:
+            self.btn_cancel_export.setEnabled(True)
+        except Exception:
+            pass
         
+    def _on_cancel_export_clicked(self):
+        """Signal the running export worker to cancel."""
+        worker = getattr(self, '_export_worker', None)
+        if worker is None:
+            self.statusBar().showMessage("No export in progress")
+            return
+        try:
+            worker._cancel_event.set()
+            self.statusBar().showMessage("Export cancellation requested...")
+            try:
+                self.btn_cancel_export.setEnabled(False)
+            except Exception:
+                pass
+        except Exception as e:
+            QMessageBox.warning(self, "Cancel Error", f"Failed to request cancellation: {e}")
     
     def build_ui(self):
         central_widget = QWidget()
@@ -489,6 +549,12 @@ class MRIViewer(QMainWindow):
             # Inform user and wait briefly for the thread to finish
             self.statusBar().showMessage("Waiting for export to finish...")
             # Wait up to 10 seconds
+            # If user requested cancellation via UI, signal the worker
+            try:
+                if hasattr(self, 'btn_cancel_export') and self.btn_cancel_export.isEnabled():
+                    self._export_worker._cancel_event.set()
+            except Exception:
+                pass
             worker.wait(10000)
             if worker.isRunning():
                 QMessageBox.warning(self, "Close Warning", "Export is still running. Close will proceed and terminate the worker.")
@@ -725,8 +791,13 @@ class MRIViewer(QMainWindow):
         # Button to export the final PDF report
         self.btn_export_report = QPushButton("Export Volume Report (PDF)")
         self.btn_export_report.clicked.connect(self.export_volume_report)
+        # Cancel export button (disabled until export starts)
+        self.btn_cancel_export = QPushButton("Cancel Export")
+        self.btn_cancel_export.setEnabled(False)
+        self.btn_cancel_export.clicked.connect(self._on_cancel_export_clicked)
         # You may want to disable this if self.mask_data is None
         report_layout.addWidget(self.btn_export_report)
+        report_layout.addWidget(self.btn_cancel_export)
 
         report_group.setLayout(report_layout)
         layout.addWidget(report_group)

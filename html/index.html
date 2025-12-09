@@ -1,0 +1,1041 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NeuroView Web Pro</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+    <style>
+        body {
+            background-color: #000;
+            color: #e5e5e5;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow: hidden;
+            user-select: none;
+        }
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #1f1f1f; }
+        ::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #444; }
+
+        .viewport {
+            position: relative;
+            border: 2px solid #262626;
+            background-color: #000;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .viewport.active {
+            border-color: #0ea5e9; /* Sky-500 */
+        }
+        .viewport canvas {
+            display: block;
+            /* Canvas size is handled by JS for perfect fit */
+        }
+        .overlay-text {
+            position: absolute;
+            top: 4px;
+            left: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            color: #38bdf8;
+            background-color: rgba(0,0,0,0.6);
+            padding: 2px 4px;
+            border-radius: 2px;
+            pointer-events: none;
+            z-index: 10;
+        }
+        input[type=range] {
+            height: 4px;
+            border-radius: 2px;
+            background: #404040;
+            outline: none;
+            appearance: none;
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: #0ea5e9;
+            cursor: pointer;
+            margin-top: -6px; /* center thumb */
+        }
+        input[type=range]::-webkit-slider-runnable-track {
+            height: 4px;
+            background: #404040;
+            border-radius: 2px;
+        }
+        input[type=range]:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+
+<div class="flex h-screen w-screen">
+    <!-- Sidebar -->
+    <div class="w-80 bg-neutral-900 border-r border-neutral-800 flex flex-col text-sm h-full z-10 shadow-xl">
+        <div class="p-4 border-b border-neutral-800">
+            <h1 class="text-xl font-bold text-sky-500 tracking-tight">NeuroView <span class="text-white">Web</span></h1>
+            <p class="text-neutral-500 text-xs mt-1">High-Performance NIfTI Viewer</p>
+        </div>
+
+        <div class="p-4 space-y-6 overflow-y-auto flex-1">
+            
+            <!-- File Operations -->
+            <div class="space-y-3">
+                <h2 class="text-xs font-bold text-neutral-400 uppercase tracking-wider">Data Source</h2>
+                
+                <div class="grid grid-cols-2 gap-2">
+                    <button id="btn-load-mri" class="py-2 px-3 rounded text-white font-medium bg-sky-700 hover:bg-sky-600 transition-colors">
+                        Load MRI
+                    </button>
+                    <button id="btn-load-mask" class="py-2 px-3 rounded text-white font-medium bg-neutral-700 hover:bg-neutral-600 transition-colors">
+                        Load Mask
+                    </button>
+                </div>
+                
+                <button id="btn-generate" class="w-full py-2 px-3 rounded text-neutral-300 font-medium bg-neutral-800 hover:bg-neutral-700 transition-colors border border-neutral-700">
+                    Generate Phantom
+                </button>
+                
+                <!-- Hidden Inputs -->
+                <input type="file" id="input-file-mri" class="hidden" accept=".nii,.nii.gz,.img,.hdr">
+                <input type="file" id="input-file-mask" class="hidden" accept=".nii,.nii.gz,.img,.hdr">
+
+                <div id="loading-indicator" class="hidden text-xs text-center text-yellow-500 font-mono animate-pulse">
+                    Processing Data...
+                </div>
+            </div>
+
+            <!-- Mask Controls -->
+            <div id="group-mask" class="space-y-3 opacity-50 pointer-events-none transition-opacity">
+                <h2 class="text-xs font-bold text-neutral-400 uppercase tracking-wider flex justify-between">
+                    Mask Overlay
+                    <input type="checkbox" id="check-mask" checked class="w-4 h-4 accent-sky-500">
+                </h2>
+                
+                <div class="space-y-1">
+                    <div class="flex justify-between text-neutral-300">
+                        <label>Opacity</label>
+                        <span id="val-mask-opacity" class="font-mono text-sky-400">0.5</span>
+                    </div>
+                    <input type="range" id="input-mask-opacity" min="0" max="1" step="0.1" value="0.5" class="w-full">
+                </div>
+            </div>
+
+            <!-- Window/Level -->
+            <div class="space-y-4">
+                <h2 class="text-xs font-bold text-neutral-400 uppercase tracking-wider">Window / Level</h2>
+                
+                <div class="space-y-1">
+                    <div class="flex justify-between text-neutral-300">
+                        <label>Contrast (Width)</label>
+                        <span id="val-ww" class="font-mono text-sky-400">400</span>
+                    </div>
+                    <input type="range" id="input-ww" min="1" max="2000" value="400" class="w-full">
+                </div>
+
+                <div class="space-y-1">
+                    <div class="flex justify-between text-neutral-300">
+                        <label>Brightness (Center)</label>
+                        <span id="val-wc" class="font-mono text-sky-400">200</span>
+                    </div>
+                    <input type="range" id="input-wc" min="0" max="1000" value="200" class="w-full">
+                </div>
+            </div>
+
+            <!-- Appearance -->
+            <div class="space-y-3">
+                <h2 class="text-xs font-bold text-neutral-400 uppercase tracking-wider">Appearance</h2>
+                
+                <div class="flex items-center justify-between">
+                    <span class="text-neutral-300">Show Crosshairs</span>
+                    <input type="checkbox" id="check-crosshair" checked class="w-4 h-4 accent-sky-500">
+                </div>
+
+                <div class="flex items-center justify-between">
+                    <span class="text-neutral-300">Invert</span>
+                    <input type="checkbox" id="check-invert" class="w-4 h-4 accent-sky-500">
+                </div>
+
+                <div class="space-y-1 pt-2">
+                    <label class="text-neutral-300 block mb-1">Colormap</label>
+                    <select id="select-colormap" class="w-full bg-neutral-800 border border-neutral-700 text-white rounded p-2 outline-none focus:border-sky-500">
+                        <option value="grayscale">Grayscale</option>
+                        <option value="hot">Hot Metal</option>
+                        <option value="cool">Cool Blue</option>
+                        <option value="rainbow">Rainbow</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- Info -->
+            <div class="p-3 bg-neutral-800 rounded font-mono text-xs text-neutral-400 space-y-1">
+                <div class="flex justify-between">
+                    <span>Dimensions:</span>
+                    <span id="info-dims" class="text-white">-</span>
+                </div>
+                <div class="flex justify-between">
+                    <span>Voxel Pos:</span>
+                    <span id="info-pos" class="text-white">[0, 0, 0]</span>
+                </div>
+                <div class="flex justify-between">
+                    <span>Intensity:</span>
+                    <span id="info-val" class="text-white">0</span>
+                </div>
+            </div>
+
+            <button id="btn-reset" class="w-full py-2 border border-neutral-600 text-neutral-400 rounded hover:bg-neutral-800 transition-colors">
+                Reset Views
+            </button>
+        </div>
+    </div>
+
+    <!-- Main Grid -->
+    <div class="flex-1 grid grid-cols-2 grid-rows-2 gap-0.5 bg-neutral-900 p-0.5">
+        
+        <!-- Axial -->
+        <div id="view-axial" class="viewport active" data-axis="axial">
+            <div class="overlay-text">AXIAL</div>
+            <div class="flex-1 relative flex items-center justify-center w-full h-full overflow-hidden">
+                <canvas></canvas>
+            </div>
+        </div>
+
+        <!-- Coronal -->
+        <div id="view-coronal" class="viewport" data-axis="coronal">
+            <div class="overlay-text">CORONAL</div>
+            <div class="flex-1 relative flex items-center justify-center w-full h-full overflow-hidden">
+                <canvas></canvas>
+            </div>
+        </div>
+
+        <!-- Sagittal -->
+        <div id="view-sagittal" class="viewport" data-axis="sagittal">
+            <div class="overlay-text">SAGITTAL</div>
+            <div class="flex-1 relative flex items-center justify-center w-full h-full overflow-hidden">
+                <canvas></canvas>
+            </div>
+        </div>
+
+        <!-- 3D Placeholder -->
+        <div class="viewport flex items-center justify-center bg-black">
+             <div class="overlay-text text-yellow-500">3D PROJECTION</div>
+             <div class="flex-1 relative flex items-center justify-center w-full h-full overflow-hidden">
+                 <canvas id="canvas-3d"></canvas>
+             </div>
+             <div id="3d-placeholder-text" class="absolute text-center pointer-events-none">
+                 <div class="w-16 h-16 rounded-full border-2 border-neutral-800 border-t-neutral-600 animate-spin mx-auto mb-2"></div>
+                 <span class="text-neutral-600 text-xs">Load Data to Render 3D</span>
+             </div>
+        </div>
+    </div>
+</div>
+
+<script>
+/**
+ * NIfTI PARSER
+ */
+class NiftiParser {
+    static parseHeader(arrayBuffer) {
+        const dataView = new DataView(arrayBuffer);
+        
+        // Basic check
+        if (arrayBuffer.byteLength < 348) throw new Error("File too small");
+
+        const headerSizeLittle = dataView.getInt32(0, true);
+        const headerSizeBig = dataView.getInt32(0, false);
+        let isLittleEndian = true;
+        
+        if (headerSizeLittle === 348 || headerSizeLittle === 540) {
+            isLittleEndian = true;
+        } else if (headerSizeBig === 348 || headerSizeBig === 540) {
+            isLittleEndian = false;
+        } else {
+            throw new Error('Invalid NIfTI header');
+        }
+
+        const dims = [];
+        for (let i = 0; i < 8; i++) {
+            dims.push(dataView.getInt16(40 + i * 2, isLittleEndian));
+        }
+
+        const datatype = dataView.getInt16(70, isLittleEndian);
+        const vox_offset = dataView.getFloat32(108, isLittleEndian);
+        const scl_slope = dataView.getFloat32(112, isLittleEndian);
+        const scl_inter = dataView.getFloat32(116, isLittleEndian);
+
+        return {
+            dims: { x: dims[1], y: dims[2], z: dims[3] || 1 },
+            datatype,
+            vox_offset,
+            scl_slope: scl_slope === 0 ? 1 : scl_slope,
+            scl_inter,
+            isLittleEndian
+        };
+    }
+
+    static readData(header, arrayBuffer) {
+        const offset = Math.floor(header.vox_offset);
+        const size = header.dims.x * header.dims.y * header.dims.z;
+        let typedArray;
+
+        switch (header.datatype) {
+            case 2: typedArray = new Uint8Array(arrayBuffer, offset, size); break;
+            case 4: typedArray = new Int16Array(arrayBuffer, offset, size); break;
+            case 8: typedArray = new Int32Array(arrayBuffer, offset, size); break;
+            case 16: typedArray = new Float32Array(arrayBuffer, offset, size); break;
+            case 64: typedArray = new Float64Array(arrayBuffer, offset, size); break;
+            case 512: typedArray = new Uint16Array(arrayBuffer, offset, size); break;
+            default: throw new Error(`Unsupported datatype: ${header.datatype}`);
+        }
+
+        // Convert to Float32 for internal processing and apply scaling if needed
+        const data = new Float32Array(size);
+        let min = Infinity;
+        let max = -Infinity;
+        
+        const slope = header.scl_slope;
+        const inter = header.scl_inter;
+
+        for (let i = 0; i < size; i++) {
+            let val = typedArray[i] * slope + inter;
+            data[i] = val;
+            if (val < min) min = val;
+            if (val > max) max = val;
+        }
+
+        return { data, min, max };
+    }
+}
+
+/**
+ * APP STATE
+ */
+const state = {
+    volume: null, // { data: Float32Array, dims: {x,y,z}, min, max }
+    mask: null,   // { data: Float32Array, dims: {x,y,z} }
+    crosshair: { x: 0, y: 0, z: 0 },
+    activeAxis: 'axial',
+    settings: {
+        windowWidth: 400,
+        windowCenter: 200,
+        showCrosshair: true,
+        invert: false,
+        colorMap: 'grayscale',
+        showMask: true,
+        maskOpacity: 0.5
+    },
+    ui: {
+        rotate3D: { x: 0, y: 0 },
+        // Pan/Zoom support per viewport
+        viewports: {
+            axial: { zoom: 1, pan: {x:0, y:0} },
+            sagittal: { zoom: 1, pan: {x:0, y:0} },
+            coronal: { zoom: 1, pan: {x:0, y:0} }
+        }
+    }
+};
+
+/**
+ * DOM ELEMENTS
+ */
+const els = {
+    viewports: {
+        axial: document.getElementById('view-axial'),
+        coronal: document.getElementById('view-coronal'),
+        sagittal: document.getElementById('view-sagittal'),
+        v3d: document.getElementById('canvas-3d')
+    },
+    inputs: {
+        ww: document.getElementById('input-ww'),
+        wc: document.getElementById('input-wc'),
+        crosshair: document.getElementById('check-crosshair'),
+        invert: document.getElementById('check-invert'),
+        colormap: document.getElementById('select-colormap'),
+        btnGenerate: document.getElementById('btn-generate'),
+        btnLoadMri: document.getElementById('btn-load-mri'),
+        btnLoadMask: document.getElementById('btn-load-mask'),
+        fileMri: document.getElementById('input-file-mri'),
+        fileMask: document.getElementById('input-file-mask'),
+        btnReset: document.getElementById('btn-reset'),
+        maskCheck: document.getElementById('check-mask'),
+        maskOpacity: document.getElementById('input-mask-opacity')
+    },
+    labels: {
+        ww: document.getElementById('val-ww'),
+        wc: document.getElementById('val-wc'),
+        maskOpacity: document.getElementById('val-mask-opacity'),
+        dims: document.getElementById('info-dims'),
+        pos: document.getElementById('info-pos'),
+        val: document.getElementById('info-val'),
+        loading: document.getElementById('loading-indicator'),
+        maskGroup: document.getElementById('group-mask'),
+        text3d: document.getElementById('3d-placeholder-text')
+    }
+};
+
+/**
+ * FILE I/O
+ */
+async function loadFile(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            try {
+                let buffer = e.target.result;
+                // Handle gzip
+                if (file.name.endsWith('.gz')) {
+                    buffer = pako.inflate(new Uint8Array(buffer)).buffer;
+                }
+                
+                const header = NiftiParser.parseHeader(buffer);
+                const result = NiftiParser.readData(header, buffer);
+                resolve({ ...result, dims: header.dims });
+            } catch (err) {
+                reject(err);
+            }
+        };
+        reader.onerror = reject;
+        reader.readAsArrayBuffer(file);
+    });
+}
+
+async function handleMriLoad(file) {
+    els.labels.loading.classList.remove('hidden');
+    els.labels.loading.textContent = `Loading ${file.name}...`;
+
+    try {
+        const vol = await loadFile(file);
+        state.volume = vol;
+        
+        // Reset View
+        const d = vol.dims;
+        state.crosshair = { x: Math.floor(d.x/2), y: Math.floor(d.y/2), z: Math.floor(d.z/2) };
+        resetViews();
+
+        // Auto W/L
+        state.settings.windowWidth = (vol.max - vol.min);
+        state.settings.windowCenter = (vol.max + vol.min) / 2;
+        
+        // Update Sliders
+        els.inputs.ww.max = (vol.max - vol.min) * 1.5;
+        els.inputs.wc.max = vol.max;
+        els.inputs.ww.value = state.settings.windowWidth;
+        els.inputs.wc.value = state.settings.windowCenter;
+        els.labels.ww.textContent = Math.round(state.settings.windowWidth);
+        els.labels.wc.textContent = Math.round(state.settings.windowCenter);
+
+        renderAll();
+        els.labels.text3d.classList.add('hidden');
+        render3D();
+    } catch (err) {
+        alert("Error loading MRI: " + err.message);
+    } finally {
+        els.labels.loading.classList.add('hidden');
+    }
+}
+
+async function handleMaskLoad(file) {
+    if (!state.volume) {
+        alert("Load an MRI volume first.");
+        return;
+    }
+    els.labels.loading.classList.remove('hidden');
+    
+    try {
+        const mask = await loadFile(file);
+        // Dim check
+        const vd = state.volume.dims;
+        const md = mask.dims;
+        if (vd.x !== md.x || vd.y !== md.y || vd.z !== md.z) {
+            throw new Error(`Dimension mismatch: MRI ${vd.x}x${vd.y}x${vd.z} vs Mask ${md.x}x${md.y}x${md.z}`);
+        }
+        
+        state.mask = mask;
+        els.labels.maskGroup.classList.remove('opacity-50', 'pointer-events-none');
+        renderAll();
+        render3D();
+    } catch (err) {
+        alert(err.message);
+    } finally {
+        els.labels.loading.classList.add('hidden');
+    }
+}
+
+function resetViews() {
+    state.ui.viewports.axial = { zoom: 1, pan: {x:0,y:0} };
+    state.ui.viewports.sagittal = { zoom: 1, pan: {x:0,y:0} };
+    state.ui.viewports.coronal = { zoom: 1, pan: {x:0,y:0} };
+    state.ui.rotate3D = { x: 0, y: 0 };
+}
+
+/**
+ * VOLUME GENERATION (Fallback)
+ */
+function generateSyntheticVolume(dims) {
+    const size = dims.x * dims.y * dims.z;
+    const data = new Float32Array(size);
+    const cx = dims.x / 2;
+    const cy = dims.y / 2;
+    const cz = dims.z / 2;
+
+    let min = Infinity;
+    let max = -Infinity;
+
+    for (let z = 0; z < dims.z; z++) {
+        for (let y = 0; y < dims.y; y++) {
+            for (let x = 0; x < dims.x; x++) {
+                const index = x + y * dims.x + z * (dims.x * dims.y);
+                const dx = (x - cx);
+                const dy = (y - cy);
+                const dz = (z - cz);
+                const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+                
+                let value = 0;
+                if (dist < cx * 0.9 && dist > cx * 0.8) value = 800 + Math.random() * 200; // Skull
+                else if (dist <= cx * 0.8) value = 400 + Math.sin(x*0.1)*50 + Math.random() * 50; // Brain
+                else value = Math.random() * 10; // Air
+
+                data[index] = value;
+                if (value < min) min = value;
+                if (value > max) max = value;
+            }
+        }
+    }
+    return { data, dims, min, max };
+}
+
+/**
+ * RENDERING
+ */
+function applyWindowLevel(val, wWidth, wCenter, map, invert) {
+    const lower = wCenter - wWidth / 2;
+    const upper = wCenter + wWidth / 2;
+    let norm = (val - lower) / (upper - lower);
+    norm = Math.max(0, Math.min(1, norm));
+    if (invert) norm = 1.0 - norm;
+    
+    const intensity = Math.floor(norm * 255);
+    
+    if (map === 'hot') return [intensity, 0, 0, 255];
+    if (map === 'cool') return [0, intensity, intensity, 255];
+    if (map === 'rainbow') {
+        const r = Math.floor(Math.sin(norm * Math.PI) * 255);
+        const g = Math.floor(Math.sin(norm * Math.PI + 2) * 255);
+        const b = Math.floor(Math.sin(norm * Math.PI + 4) * 255);
+        return [Math.abs(r), Math.abs(g), Math.abs(b), 255];
+    }
+    return [intensity, intensity, intensity, 255];
+}
+
+function getMaskColor(val) {
+    if (val <= 0) return null;
+    const colors = [
+        [255, 0, 0],   // 1 Red
+        [0, 255, 0],   // 2 Green
+        [0, 0, 255],   // 3 Blue
+        [255, 255, 0], // 4 Yellow
+        [0, 255, 255], // 5 Cyan
+        [255, 0, 255]  // 6 Magenta
+    ];
+    const idx = (Math.round(val) - 1) % colors.length;
+    return colors[idx];
+}
+
+// Reusable Temp Canvas for Offscreen Rendering
+const tempCanvas = document.createElement('canvas');
+const tempCtx = tempCanvas.getContext('2d');
+
+function drawViewport(axis) {
+    if (!state.volume) return;
+
+    const container = els.viewports[axis];
+    const canvas = container.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const wrapper = canvas.parentElement;
+    const vpState = state.ui.viewports[axis];
+    
+    let w, h;
+    const d = state.volume.dims;
+    if (axis === 'axial') { w = d.x; h = d.y; }
+    else if (axis === 'sagittal') { w = d.y; h = d.z; }
+    else if (axis === 'coronal') { w = d.x; h = d.z; }
+
+    // Resize main canvas to container (Display Resolution)
+    const rect = wrapper.getBoundingClientRect();
+    canvas.width = rect.width;
+    canvas.height = rect.height;
+
+    // Resize temp canvas to image data (Source Resolution)
+    if (tempCanvas.width !== w || tempCanvas.height !== h) {
+        tempCanvas.width = w;
+        tempCanvas.height = h;
+    }
+
+    // 1. GENERATE PIXELS (Source Resolution)
+    const imgData = tempCtx.createImageData(w, h);
+    const pixels = imgData.data;
+    const { data } = state.volume;
+    const strideXY = d.x * d.y;
+    
+    const sliceIdx = axis === 'axial' ? state.crosshair.z :
+                     axis === 'sagittal' ? state.crosshair.x : 
+                     state.crosshair.y;
+
+    const showMask = state.mask && state.settings.showMask;
+    const maskOp = state.settings.maskOpacity;
+
+    for (let row = 0; row < h; row++) {
+        for (let col = 0; col < w; col++) {
+            let x, y, z;
+            if (axis === 'axial') { x=col; y=row; z=sliceIdx; }
+            else if (axis === 'sagittal') { x=sliceIdx; y=col; z=row; }
+            else if (axis === 'coronal') { x=col; y=sliceIdx; z=row; }
+
+            if(x<0||x>=d.x||y<0||y>=d.y||z<0||z>=d.z) continue;
+
+            const idx = x + y * d.x + z * strideXY;
+            const val = data[idx];
+
+            let [r, g, b, a] = applyWindowLevel(val, state.settings.windowWidth, state.settings.windowCenter, state.settings.colorMap, state.settings.invert);
+
+            // Mask Overlay
+            if (showMask) {
+                const mVal = state.mask.data[idx];
+                const mColor = getMaskColor(mVal);
+                if (mColor) {
+                    r = r * (1 - maskOp) + mColor[0] * maskOp;
+                    g = g * (1 - maskOp) + mColor[1] * maskOp;
+                    b = b * (1 - maskOp) + mColor[2] * maskOp;
+                }
+            }
+            
+            const pxIndex = (row * w + col) * 4;
+            pixels[pxIndex] = r;
+            pixels[pxIndex+1] = g;
+            pixels[pxIndex+2] = b;
+            pixels[pxIndex+3] = 255;
+        }
+    }
+    
+    tempCtx.putImageData(imgData, 0, 0);
+
+    // 2. DRAW TO DISPLAY (Fit Contain + Pan/Zoom)
+    ctx.imageSmoothingEnabled = false; // keep pixelated look
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    // Calculate "Contain" Ratio
+    const scaleX = canvas.width / w;
+    const scaleY = canvas.height / h;
+    const baseScale = Math.min(scaleX, scaleY); // Fit whole image
+    
+    // Center offsets
+    const offsetX = (canvas.width - w * baseScale) / 2;
+    const offsetY = (canvas.height - h * baseScale) / 2;
+
+    ctx.save();
+    
+    // Apply transforms: Translate Center -> Apply Pan -> Apply Zoom -> Apply Base Scale
+    ctx.translate(offsetX + vpState.pan.x, offsetY + vpState.pan.y);
+    ctx.scale(baseScale * vpState.zoom, baseScale * vpState.zoom);
+    
+    ctx.drawImage(tempCanvas, 0, 0);
+
+    // 3. DRAW CROSSHAIRS (Transformed space)
+    if (state.settings.showCrosshair) {
+        let cx = 0, cy = 0;
+        if (axis === 'axial') { cx = state.crosshair.x; cy = state.crosshair.y; }
+        else if (axis === 'sagittal') { cx = state.crosshair.y; cy = state.crosshair.z; }
+        else if (axis === 'coronal') { cx = state.crosshair.x; cy = state.crosshair.z; }
+
+        ctx.strokeStyle = '#FFFF00';
+        ctx.lineWidth = 1 / (baseScale * vpState.zoom); // Keep line thin
+        ctx.globalAlpha = 0.5;
+        ctx.beginPath();
+        // Crosshair spans the whole image, not just canvas
+        ctx.moveTo(cx, 0); ctx.lineTo(cx, h);
+        ctx.moveTo(0, cy); ctx.lineTo(w, cy);
+        ctx.stroke();
+    }
+    
+    ctx.restore();
+
+    container.querySelector('.overlay-text').textContent = `${axis.toUpperCase()} [${sliceIdx}]`;
+}
+
+function render3D() {
+    if (!state.volume) return;
+    const canvas = els.viewports.v3d;
+    const ctx = canvas.getContext('2d');
+    
+    const rect = canvas.parentElement.getBoundingClientRect();
+    canvas.width = rect.width;
+    canvas.height = rect.height;
+
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0,0,canvas.width, canvas.height);
+    
+    const d = state.volume.dims;
+    const cx = canvas.width/2;
+    const cy = canvas.height/2;
+    // slightly smaller scale to fit rotation
+    const scale = Math.min(canvas.width, canvas.height) / Math.max(d.x, d.y, d.z) * 0.5;
+    
+    const angleX = state.ui.rotate3D.x + Math.PI/4;
+    const angleY = state.ui.rotate3D.y + Math.PI/4;
+    
+    // Project Helper
+    const project = (x, y, z) => {
+        // Center bbox
+        let dx = x - d.x/2;
+        let dy = y - d.y/2;
+        let dz = z - d.z/2;
+        
+        // Rotate Y
+        let x1 = dx * Math.cos(angleY) - dz * Math.sin(angleY);
+        let z1 = dx * Math.sin(angleY) + dz * Math.cos(angleY);
+        
+        // Rotate X
+        let y2 = dy * Math.cos(angleX) - z1 * Math.sin(angleX);
+        
+        return [cx + x1 * scale, cy + y2 * scale];
+    };
+    
+    // Draw Bounding Box
+    ctx.strokeStyle = '#0ea5e9';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    const corners = [
+        [0,0,0], [d.x,0,0], [d.x,d.y,0], [0,d.y,0],
+        [0,0,d.z], [d.x,0,d.z], [d.x,d.y,d.z], [0,d.y,d.z]
+    ];
+    const pts = corners.map(p => project(p[0], p[1], p[2]));
+    const edges = [
+        [0,1], [1,2], [2,3], [3,0], // Front
+        [4,5], [5,6], [6,7], [7,4], // Back
+        [0,4], [1,5], [2,6], [3,7]  // Sides
+    ];
+    edges.forEach(e => {
+        ctx.moveTo(pts[e[0]][0], pts[e[0]][1]);
+        ctx.lineTo(pts[e[1]][0], pts[e[1]][1]);
+    });
+    ctx.stroke();
+
+    // Draw Real Mask Data (Point Cloud)
+    if (state.mask && state.settings.showMask) {
+        ctx.fillStyle = '#FF0000'; // Default mask color
+        
+        // Performance optimization: Stride
+        // Render max ~5000 points to keep FPS sane in JS
+        const totalVoxels = d.x * d.y * d.z;
+        const stride = Math.max(1, Math.floor(Math.pow(totalVoxels / 5000, 1/3)));
+        
+        for(let z=0; z<d.z; z+=stride) {
+            for(let y=0; y<d.y; y+=stride) {
+                for(let x=0; x<d.x; x+=stride) {
+                    const idx = x + y*d.x + z*d.x*d.y;
+                    const mVal = state.mask.data[idx];
+                    
+                    if(mVal > 0) {
+                        const mColor = getMaskColor(mVal);
+                        if(mColor) {
+                            ctx.fillStyle = `rgb(${mColor[0]},${mColor[1]},${mColor[2]})`;
+                            const p = project(x,y,z);
+                            ctx.fillRect(p[0], p[1], 2, 2);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+function renderAll() {
+    drawViewport('axial');
+    drawViewport('sagittal');
+    drawViewport('coronal');
+    updateInfo();
+}
+
+function updateInfo() {
+    if (!state.volume) return;
+    const d = state.volume.dims;
+    const x = state.crosshair.x;
+    const y = state.crosshair.y;
+    const z = state.crosshair.z;
+    
+    els.labels.pos.textContent = `[${x}, ${y}, ${z}]`;
+    els.labels.dims.textContent = `${d.x} x ${d.y} x ${d.z}`;
+    
+    // Get intensity
+    const idx = x + y * d.x + z * d.x * d.y;
+    const val = state.volume.data[idx];
+    els.labels.val.textContent = val ? val.toFixed(1) : '0';
+}
+
+function setActiveViewport(axis) {
+    state.activeAxis = axis;
+    Object.values(els.viewports).forEach(el => el && el.classList.remove('active'));
+    if (els.viewports[axis]) els.viewports[axis].classList.add('active');
+}
+
+/**
+ * EVENTS
+ */
+
+// File Buttons
+els.inputs.btnLoadMri.addEventListener('click', () => els.inputs.fileMri.click());
+els.inputs.btnLoadMask.addEventListener('click', () => els.inputs.fileMask.click());
+
+els.inputs.fileMri.addEventListener('change', (e) => {
+    if(e.target.files[0]) handleMriLoad(e.target.files[0]);
+});
+
+els.inputs.fileMask.addEventListener('change', (e) => {
+    if(e.target.files[0]) handleMaskLoad(e.target.files[0]);
+});
+
+// Generate
+els.inputs.btnGenerate.addEventListener('click', () => {
+    els.labels.loading.classList.remove('hidden');
+    els.labels.loading.textContent = "Generating Phantom...";
+    setTimeout(() => {
+        const dims = { x: 180, y: 220, z: 180 };
+        const result = generateSyntheticVolume(dims);
+        state.volume = result;
+        state.mask = null; // clear mask
+        state.crosshair = { x: 90, y: 110, z: 90 };
+        resetViews();
+        state.settings.windowWidth = 400;
+        state.settings.windowCenter = 400;
+        
+        // Update UI
+        els.inputs.ww.value = 400;
+        els.inputs.wc.value = 400;
+        els.labels.ww.textContent = 400;
+        els.labels.wc.textContent = 400;
+        els.labels.maskGroup.classList.add('opacity-50', 'pointer-events-none');
+        
+        renderAll();
+        els.labels.text3d.classList.add('hidden');
+        render3D();
+        els.labels.loading.classList.add('hidden');
+    }, 50);
+});
+
+// Sliders
+els.inputs.ww.addEventListener('input', (e) => {
+    state.settings.windowWidth = Number(e.target.value);
+    els.labels.ww.textContent = e.target.value;
+    renderAll();
+});
+els.inputs.wc.addEventListener('input', (e) => {
+    state.settings.windowCenter = Number(e.target.value);
+    els.labels.wc.textContent = e.target.value;
+    renderAll();
+});
+els.inputs.maskOpacity.addEventListener('input', (e) => {
+    state.settings.maskOpacity = Number(e.target.value);
+    els.labels.maskOpacity.textContent = e.target.value;
+    renderAll();
+});
+
+// Options
+els.inputs.crosshair.addEventListener('change', (e) => {
+    state.settings.showCrosshair = e.target.checked;
+    renderAll();
+});
+els.inputs.invert.addEventListener('change', (e) => {
+    state.settings.invert = e.target.checked;
+    renderAll();
+});
+els.inputs.maskCheck.addEventListener('change', (e) => {
+    state.settings.showMask = e.target.checked;
+    renderAll();
+    render3D(); // Mask affects 3D too
+});
+els.inputs.colormap.addEventListener('change', (e) => {
+    state.settings.colorMap = e.target.value;
+    renderAll();
+});
+els.inputs.btnReset.addEventListener('click', () => {
+    if(state.volume) {
+        const d = state.volume.dims;
+        state.crosshair = { x: Math.floor(d.x/2), y: Math.floor(d.y/2), z: Math.floor(d.z/2) };
+        resetViews();
+        renderAll();
+    }
+});
+
+// Viewport Interactions
+['axial', 'sagittal', 'coronal'].forEach(axis => {
+    const container = els.viewports[axis];
+    
+    // Prevent default context menu
+    container.addEventListener('contextmenu', e => e.preventDefault());
+
+    container.addEventListener('mousedown', (e) => {
+        if (!state.volume) return;
+        setActiveViewport(axis);
+        
+        const startX = e.clientX;
+        const startY = e.clientY;
+        const startPan = { ...state.ui.viewports[axis].pan };
+        
+        // Mode detection
+        const isPan = e.button === 2 || (e.button === 0 && e.shiftKey); // Right click or Shift+Left
+        
+        const onMove = (mv) => {
+            if (isPan) {
+                // PAN LOGIC
+                state.ui.viewports[axis].pan.x = startPan.x + (mv.clientX - startX);
+                state.ui.viewports[axis].pan.y = startPan.y + (mv.clientY - startY);
+                drawViewport(axis);
+            } else {
+                // CROSSHAIR LOGIC
+                const canvas = container.querySelector('canvas');
+                // We need to map mouse coordinates back to Image Space
+                // This reverses the transforms in drawViewport
+                const rect = canvas.getBoundingClientRect();
+                const vpState = state.ui.viewports[axis];
+                
+                // Get slice dims
+                let w, h;
+                const d = state.volume.dims;
+                if (axis === 'axial') { w = d.x; h = d.y; }
+                else if (axis === 'sagittal') { w = d.y; h = d.z; }
+                else if (axis === 'coronal') { w = d.x; h = d.z; }
+
+                // Calculate scales used in draw
+                const scaleX = canvas.width / w;
+                const scaleY = canvas.height / h;
+                const baseScale = Math.min(scaleX, scaleY);
+                const totalScale = baseScale * vpState.zoom;
+                
+                // Calculate offsets used in draw
+                const offsetX = (canvas.width - w * baseScale) / 2;
+                const offsetY = (canvas.height - h * baseScale) / 2;
+                
+                // Inverse transform
+                // Mouse -> remove Pan -> remove Center Offset -> Scale down
+                const mouseX = (mv.clientX - rect.left);
+                const mouseY = (mv.clientY - rect.top);
+                
+                const imgX = (mouseX - (offsetX + vpState.pan.x)) / totalScale;
+                const imgY = (mouseY - (offsetY + vpState.pan.y)) / totalScale;
+                
+                // Apply to crosshair
+                if (axis === 'axial') {
+                    state.crosshair.x = Math.max(0, Math.min(d.x-1, Math.floor(imgX)));
+                    state.crosshair.y = Math.max(0, Math.min(d.y-1, Math.floor(imgY)));
+                } else if (axis === 'sagittal') {
+                    state.crosshair.y = Math.max(0, Math.min(d.y-1, Math.floor(imgX)));
+                    state.crosshair.z = Math.max(0, Math.min(d.z-1, Math.floor(imgY)));
+                } else if (axis === 'coronal') {
+                    state.crosshair.x = Math.max(0, Math.min(d.x-1, Math.floor(imgX)));
+                    state.crosshair.z = Math.max(0, Math.min(d.z-1, Math.floor(imgY)));
+                }
+                renderAll();
+            }
+        };
+        
+        const onUp = () => {
+            window.removeEventListener('mousemove', onMove);
+            window.removeEventListener('mouseup', onUp);
+        };
+        
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+    });
+
+    // Zoom (Wheel)
+    container.addEventListener('wheel', (e) => {
+        if (!state.volume) return;
+        e.preventDefault();
+        
+        // If Shift is pressed or specific mode -> Zoom
+        // Default -> Slice Scroll
+        
+        if (e.ctrlKey || e.metaKey) {
+            // ZOOM
+            const zoomSpeed = 0.1;
+            const newZoom = state.ui.viewports[axis].zoom - Math.sign(e.deltaY) * zoomSpeed;
+            state.ui.viewports[axis].zoom = Math.max(0.1, Math.min(10, newZoom));
+            drawViewport(axis);
+        } else {
+            // SLICE SCROLL
+            const d = state.volume.dims;
+            const dir = Math.sign(e.deltaY);
+            if (axis === 'axial') state.crosshair.z = Math.max(0, Math.min(d.z-1, state.crosshair.z + dir));
+            if (axis === 'sagittal') state.crosshair.x = Math.max(0, Math.min(d.x-1, state.crosshair.x + dir));
+            if (axis === 'coronal') state.crosshair.y = Math.max(0, Math.min(d.y-1, state.crosshair.y + dir));
+            renderAll();
+        }
+    }, { passive: false });
+});
+
+// 3D Rotation
+const v3d = els.viewports.v3d;
+v3d.parentElement.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    let lastX = e.clientX;
+    let lastY = e.clientY;
+    
+    const onMove = (mv) => {
+        const deltaX = mv.clientX - lastX;
+        const deltaY = mv.clientY - lastY;
+        state.ui.rotate3D.x += deltaY * 0.01;
+        state.ui.rotate3D.y += deltaX * 0.01;
+        lastX = mv.clientX;
+        lastY = mv.clientY;
+        render3D();
+    };
+    const onUp = () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+});
+
+// Keyboard
+window.addEventListener('keydown', (e) => {
+    if (!state.volume) return;
+    const axis = state.activeAxis;
+    const d = state.volume.dims;
+    let changed = false;
+    
+    if (e.key === 'ArrowUp') {
+        if (axis === 'axial') state.crosshair.z = Math.min(d.z-1, state.crosshair.z + 1);
+        if (axis === 'sagittal') state.crosshair.x = Math.min(d.x-1, state.crosshair.x + 1);
+        if (axis === 'coronal') state.crosshair.y = Math.min(d.y-1, state.crosshair.y + 1);
+        changed = true;
+    } else if (e.key === 'ArrowDown') {
+        if (axis === 'axial') state.crosshair.z = Math.max(0, state.crosshair.z - 1);
+        if (axis === 'sagittal') state.crosshair.x = Math.max(0, state.crosshair.x - 1);
+        if (axis === 'coronal') state.crosshair.y = Math.max(0, state.crosshair.y - 1);
+        changed = true;
+    }
+    
+    if (changed) {
+        e.preventDefault();
+        renderAll();
+    }
+});
+
+// Window Resize Handling
+window.addEventListener('resize', () => {
+    renderAll();
+    render3D();
+});
+
+</script>
+</body>
+</html>
