@@ -26,7 +26,7 @@ import vtk # Assuming this is already imported
 # --- Import Dependencies ---
 from src.utils.check_imports import *
 from src.utils.mouse_wheel_interactor_style import MouseWheelInteractorStyle
-from src.utils.snapshots import _create_2d_slice_snapshot_mpl
+from src.utils.snapshots import _create_2d_slice_snapshot_mpl, _create_3d_snapshot_pv
 
 # Custom interactor style for mouse wheel navigation
 
@@ -236,22 +236,124 @@ class MRIViewer(QMainWindow):
 
             # 2. 2D Slices with Mask Overlay
             story.append(Paragraph("<b>2D Slices with Segmentation Mask Overlay</b>", styles['Heading2']))
-            slice_images = []
-            
+
+            # We'll collect the central (single) small thumbnails first, then
+            # optionally include larger montages for full-slice exports.
+            central_thumbs = []
+            montages = []
+
+            # Local montage builder (Pillow). Returns path or None on failure.
+            def _make_montage(items, thumb_w=300, thumb_h=300, cols=4):
+                try:
+                    from PIL import Image as PILImage
+                except Exception:
+                    return None
+                import math, uuid
+
+                imgs = []
+                for it in items:
+                    try:
+                        if isinstance(it, str):
+                            im = PILImage.open(it).convert('RGB')
+                        else:
+                            # Assume numpy array
+                            im = PILImage.fromarray(it)
+                        # Preserve aspect ratio: create a thumbnail that fits
+                        # within (thumb_w, thumb_h) and paste centered into a
+                        # background box of that size.
+                        im.thumbnail((thumb_w, thumb_h), PILImage.LANCZOS)
+                        bg = PILImage.new('RGB', (thumb_w, thumb_h), (255, 255, 255))
+                        offset = ((thumb_w - im.width) // 2, (thumb_h - im.height) // 2)
+                        bg.paste(im, offset)
+                        imgs.append(bg)
+                    except Exception:
+                        continue
+
+                if not imgs:
+                    return None
+
+                n = len(imgs)
+                cols = min(cols, n)
+                rows = math.ceil(n / cols)
+                montage = PILImage.new('RGB', (cols * thumb_w, rows * thumb_h), (255, 255, 255))
+                for idx, im in enumerate(imgs):
+                    r = idx // cols
+                    c = idx % cols
+                    montage.paste(im, (c * thumb_w, r * thumb_h))
+
+                temp_path = os.path.join(tempfile.gettempdir(), f"montage_{uuid.uuid4().hex}.png")
+                montage.save(temp_path)
+                return temp_path
+
             for view in ['axial', 'coronal', 'sagittal']:
-                path = self._create_2d_slice_snapshot(view, size=(200, 200)) # Small image size
-                if path:
-                    temp_images.append(path)
-                    # Use a fixed width/height for display in PDF
-                    slice_images.append(Image(path, width=150, height=150))
-            
-            if slice_images:
+                # 1) Central small thumbnail (keep existing behavior)
+                central = self._create_2d_slice_snapshot(view, size=(200, 200))
+                # Be defensive: if the snapshot function returns a list or array,
+                # pick the central element or save the array to a temp file.
+                if isinstance(central, list):
+                    pick = central[len(central) // 2]
+                    if isinstance(pick, np.ndarray):
+                        tmp = os.path.join(tempfile.gettempdir(), f"slice_tmp_{view}.png")
+                        plt.imsave(tmp, pick)
+                        temp_images.append(tmp)
+                        central_thumbs.append(Image(tmp, width=150, height=150))
+                    else:
+                        temp_images.append(pick)
+                        central_thumbs.append(Image(pick, width=150, height=150))
+                elif isinstance(central, np.ndarray):
+                    tmp = os.path.join(tempfile.gettempdir(), f"slice_tmp_{view}.png")
+                    plt.imsave(tmp, central)
+                    temp_images.append(tmp)
+                    central_thumbs.append(Image(tmp, width=150, height=150))
+                elif central:
+                    temp_images.append(central)
+                    central_thumbs.append(Image(central, width=150, height=150))
+
+                # 2) All-slices (bigger montage). Use the mpl helper directly to
+                # request all slices; prefer file paths but accept arrays.
+                try:
+                    all_res = _create_2d_slice_snapshot_mpl(self, view, size=(400, 400), all_slices=True, return_arrays=False)
+                except Exception:
+                    all_res = None
+
+                if all_res:
+                    if isinstance(all_res, list):
+                        montage_path = _make_montage(all_res, thumb_w=300, thumb_h=300, cols=4)
+                        if montage_path:
+                            temp_images.append(montage_path)
+                            montages.append((view, Image(montage_path, width=400, height=400)))
+                        else:
+                            # Fallback to central if montage creation failed
+                            pass
+
+                    elif isinstance(all_res, np.ndarray):
+                        # Save array to temp file and create montage with single image
+                        tmp = os.path.join(tempfile.gettempdir(), f"slice_all_{view}.png")
+                        plt.imsave(tmp, all_res)
+                        temp_images.append(tmp)
+                        montages.append((view, Image(tmp, width=400, height=400)))
+
+                    else:
+                        # Single path returned (unlikely), include as montage
+                        temp_images.append(all_res)
+                        montages.append((view, Image(all_res, width=400, height=400)))
+
+            # Add central thumbnails table (Axial / Coronal / Sagittal)
+            if central_thumbs:
                 story.append(Table([[
-                    Paragraph("Axial", styles['Code']), 
-                    Paragraph("Coronal", styles['Code']), 
+                    Paragraph("Axial", styles['Code']),
+                    Paragraph("Coronal", styles['Code']),
                     Paragraph("Sagittal", styles['Code'])
-                ], slice_images]))
+                ], central_thumbs]))
                 story.append(Spacer(1, 12))
+
+            # Add larger per-axis montages (each on its own row)
+            if montages:
+                story.append(Paragraph("<b>All Slices Montages (per axis)</b>", styles['Heading2']))
+                for view_name, img_obj in montages:
+                    story.append(Paragraph(view_name.capitalize(), styles['Heading3']))
+                    story.append(Table([[img_obj]]))
+                    story.append(Spacer(1, 12))
 
             # 3. 3D Views - All Labels
             if self.mask_data is not None:
@@ -1509,11 +1611,15 @@ class MRIViewer(QMainWindow):
             depth, height, width = self.mask_data.shape
             self.mask_image_data.SetDimensions(width, height, depth)
             self.mask_image_data.AllocateScalars(vtk.VTK_UNSIGNED_SHORT, 1)
-            
-            for z in range(depth):
-                for y in range(height):
-                    for x in range(width):
-                        self.mask_image_data.SetScalarComponentFromDouble(x, y, z, 0, self.mask_data[z, y, x])
+            # Fast path: convert NumPy array to VTK array in one shot instead of
+            # looping over every voxel (which is extremely slow for large volumes).
+            # Ensure the array is C-contiguous and flattened in the same ordering
+            # used when setting VTK dimensions (X, Y, Z).
+            from vtk.util import numpy_support
+            mask_contig = np.ascontiguousarray(self.mask_data)
+            flat = mask_contig.ravel(order='C')
+            vtk_arr = numpy_support.numpy_to_vtk(num_array=flat, deep=True, array_type=vtk.VTK_UNSIGNED_SHORT)
+            self.mask_image_data.GetPointData().SetScalars(vtk_arr)
             
             self.setup_mask_visualization()
             
@@ -1953,113 +2059,4 @@ class MRIViewer(QMainWindow):
 
     _create_2d_slice_snapshot = _create_2d_slice_snapshot_mpl
 
-    def _create_3d_snapshot(self, label_value=None, angle_index=0, size=(400, 400)):
-        """
-        Generates a 3D snapshot from a specific angle.
-        label_value=None renders all labels.
-        angle_index (0, 1, 2) corresponds to a different camera view.
-        Returns the path to the saved PNG image.
-        """
-        if self.mask_data is None: return None
-
-        # 1. Setup Off-Screen Renderer
-        renderWindow = vtk.vtkRenderWindow()
-        renderWindow.SetOffScreenRendering(1)
-        renderWindow.SetSize(size)
-        renderer = vtk.vtkRenderer()
-        renderWindow.AddRenderer(renderer)
-        renderer.SetBackground(0.0, 0.0, 0.0) # Black background
-
-        # 2. Filter Mask Data for Label (if specified)
-        if label_value is not None:
-            # Create a binary array where only the target label is 1
-            data_to_render = (self.mask_data == label_value).astype(np.float32)
-        else:
-            # Render all labels (using the mask data itself, converted to float)
-            data_to_render = self.mask_data.astype(np.float32)
-            
-        # --- FIX: Ensure Contiguity for the data being passed to Marching Cubes ---
-        data_to_render_contiguous = data_to_render.copy()
-        # --------------------------------------------------------------------------
-
-        # 3. VTK Pipeline (Marching Cubes for Surface)
-        importer = vtk.vtkImageImport()
-        importer.SetDataScalarTypeToFloat()
-        importer.SetNumberOfScalarComponents(1)
-        
-        # Use the contiguous copy
-        importer.SetImportVoidPointer(data_to_render_contiguous, data_to_render_contiguous.nbytes)
-        
-        importer.SetDataExtent(0, data_to_render.shape[2] - 1, 
-                               0, data_to_render.shape[1] - 1, 
-                               0, data_to_render.shape[0] - 1)
-        importer.SetWholeExtent(importer.GetDataExtent())
-        importer.Update()
-        
-        # ... (rest of the VTK pipeline remains the same) ...
-        
-        # Use Marching Cubes to extract the surface
-        mc = vtk.vtkMarchingCubes()
-        mc.SetInputConnection(importer.GetOutputPort())
-        mc.SetValue(0, 0.5) # Isosurface at 0.5 (separating 0 from 1)
-        
-        # Smoother appearance
-        smoother = vtk.vtkSmoothPolyDataFilter()
-        smoother.SetInputConnection(mc.GetOutputPort())
-        smoother.SetNumberOfIterations(10)
-        
-        # Mapper and Actor
-        mapper = vtk.vtkPolyDataMapper()
-        mapper.SetInputConnection(smoother.GetOutputPort())
-        
-        actor = vtk.vtkActor()
-        actor.SetMapper(mapper)
-        
-        # Set color based on label (e.g., green for all/unknown, specific color for individual)
-        if label_value is None:
-            actor.GetProperty().SetColor(0.2, 0.8, 0.2) # Light Green for All
-        else:
-            # Simple color mapping for individual labels
-            hue = (label_value * 0.6180339887) % 1.0 # Golden ratio color
-            color = vtk.vtkColorTransferFunction()
-            color.AddRGBPoint(0.0, 1.0, 1.0, 1.0)
-            color.AddRGBPoint(1.0, hue, 1.0 - hue, 0.5)
-            r, g, b = color.GetColor(1.0)
-            actor.GetProperty().SetColor(r, g, b)
-            
-        renderer.AddActor(actor)
-
-        # 4. Camera Setup
-        renderer.ResetCamera()
-        camera = renderer.GetActiveCamera()
-        
-        # Define 3 distinct viewing angles
-        angles = [
-            (0, 0, 0),        # Front View
-            (45, 15, 0),      # Oblique Top-Right View
-            (90, 0, 0),       # Left Profile View
-        ]
-        
-        az, el, roll = angles[angle_index % 3]
-        camera.Azimuth(az)
-        camera.Elevation(el)
-        camera.Roll(roll)
-        renderer.ResetCameraClippingRange()
-        renderer.Render()
-
-        # 5. Snapshot and Cleanup
-        w2if = vtk.vtkWindowToImageFilter()
-        w2if.SetInput(renderWindow)
-        w2if.Update()
-
-        temp_path = os.path.join(tempfile.gettempdir(), f"3d_{label_value or 'all'}_{angle_index}.png")
-        writer = vtk.vtkPNGWriter()
-        writer.SetFileName(temp_path)
-        writer.SetInputConnection(w2if.GetOutputPort())
-        writer.Write()
-        
-        renderer.RemoveAllViewProps()
-        renderWindow.Finalize()
-        del renderWindow, renderer, w2if, writer
-        
-        return temp_path
+    _create_3d_snapshot = _create_3d_snapshot_pv
