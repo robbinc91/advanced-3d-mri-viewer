@@ -18,69 +18,114 @@ PyQt5 for a sleek, modern, and intuitive graphical user interface.
 
 NiBabel for robust NIfTI file handling.
 
-✨ Key Features & Functionalities
 
-This viewer is a comprehensive inspection tool packed with essential features for medical image analysis, categorized for easy reference:
+⚠️ Project Status: Active Development — Stable Core, Evolving Features
 
-🖼️ Core Visualization & Navigation
+This repository is a practical, researcher-friendly MRI viewer built in Python. It combines high-performance 3D visualization with robust 2D slice inspection and a growing set of export and analysis utilities. The project is useful for prototyping, teaching, and lightweight clinical research workflows.
 
-Four-Panel Layout: Simultaneous and linked viewing of 3D volumetric rendering alongside 2D Axial, Sagittal, and Coronal slices.
+---
 
-Crosshair Synchronization: A dynamic, yellow crosshair is drawn across the 2D slices to visually indicate the current position of the orthogonal viewing planes.
+## What makes this viewer interesting
 
-Slice Navigation: Smoothly navigate through slices using vertical sliders and the mouse wheel on any 2D view.
+- Fast volume and surface rendering with both VTK and PyVista pipelines.
+- Modern Qt-based GUI with a four-panel synchronized view (3D + axial/coronal/sagittal).
+- Export-first design: built-in screenshot capture, high-fidelity PDF reporting with montages, and responsive background export with progress and cancellation.
 
-NIfTI File Support: Seamlessly load MRI and segmentation masks (.nii or .nii.gz formats).
+---
 
-🎨 Rendering & Display Controls
+## Quick Features Summary (What it currently does)
 
-Colormap Selection: Easily switch between various volumetric and 2D slice color maps (e.g., Grayscale, Hot Metal, Bone) via a dedicated dropdown.
+- UI & Navigation
+	- Four linked views: 3D rendering + Axial/Coronal/Sagittal 2D slices.
+	- Crosshair synchronization across 2D views.
+	- Slice navigation via sliders and mouse wheel.
 
-Window/Level Controls: Interactive sliders to adjust the contrast (Window) and brightness (Level) of the MRI image data for enhanced visual inspection.
+- 2D Snapshot & Slicing
+	- Central-slice snapshots exported as PNG.
+	- `create_all_2d_slices` and `_create_2d_slice_snapshot_mpl` support producing ALL slices per axis.
+	- Optionally return images as Numpy arrays (`return_arrays=True`) or as temporary PNG files.
+	- When generating full-axis slice lists, the code filters out empty slices (only includes slices where the mask is present).
+	- Aspect-ratio preserving thumbnails and sampling (montage selection can sample up to a configurable maximum — by default we sample up to 15 slices evenly).
 
-Rendering Options: Toggle the 3D volume rendering mode for different visual effects (e.g., shading on/off).
+- 3D Snapshot & Surface Extraction
+	- Pure-PyVista implementation (`_create_3d_snapshot_pv`) using `skimage.measure.marching_cubes` for per-label surface extraction (no VTK dependency inside that helper).
+	- A VTK-based 3D snapshot pipeline is also present and used across the viewer.
 
-🎭 Mask & Annotation Tools
+- Export & Reporting
+	- `export_volume_report` builds a multi-page PDF (using ReportLab) with:
+		- Central thumbnails for each axis,
+		- Per-axis montages of selected slices (preserving aspect ratio),
+		- Volumetric analysis table (per-label volumes),
+		- 3D overview images and per-label 3D snapshots.
+	- Export runs in a background `QThread` (`ExportWorker`) so the UI stays responsive.
+	- Visible progress bar and status messages show export progress.
+	- Export can be canceled via a dedicated "Cancel Export" button; the worker checks a cancellation event and aborts gracefully.
+	- Temporary images used during export are cleaned up after the PDF is built.
 
-Toggle Mask: Quickly show/hide the 3D mask actors and the 2D mask overlays.
+- Performance & Internals
+	- Large-array transfers to VTK are performed with `vtk.util.numpy_support.numpy_to_vtk` (no Python-level loops), improving responsiveness when updating VTK image data.
+	- Optimized mask handling: crops and marching-cubes per-label to reduce memory and speed up mesh generation.
 
-Mask Opacity: Fine-tune the transparency of both the 3D mask and 2D overlays using a dedicated slider.
+- Image Processing Utilities
+	- Several common filters and preprocessing steps are available (Gaussian smoothing, denoising, morphological ops, N4 bias correction via SimpleITK when installed).
 
-Annotations: Functionality to add, visualize, and clear simple point annotations in 3D and on the 2D slices.
+---
 
-⚙️ Image Processing & Filtering
+## Installation
 
-Pre- and Post-Filtering: Apply standard image filters to the volumetric data before and after primary processing.
+This project targets Python 3.8+ (many imaging stacks work best on 3.8–3.10). Start by creating a virtual environment and installing required packages.
 
-Filter Strength Adjustment: A spin box allows for precise control of filter parameters (e.g., sigma for Gaussian filtering).
+Basic required dependencies are listed in `requirements.txt`, but several optional packages enable enhanced features (PDF export, montage creation, PyVista rendering, etc.).
 
-Available Filters:
+Recommended install (includes optional extras used by export and PyVista):
 
-Denoising: Gaussian, Median, Bilateral, and Total Variation (TV) Denoising.
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pip install matplotlib pillow reportlab pyvista nibabel
+```
 
-Morphology: Erosion, Dilation, Opening, and Closing operations.
+Notes:
+- `vtk` can be tricky to install on some platforms; prefer `pip install vtk` or use conda packages if you run into issues.
+- `pyvista` is optional but required for the PyVista-based 3D snapshot helper.
 
-💻 Utilities & UI
+---
 
-Dark UI: A polished, dark-themed user interface provides an optimal viewing environment for medical images.
+## Quickstart (Run the viewer)
 
-Fullscreen Mode: Maximize any of the four views with a dedicated button; exit quickly with the Escape key shortcut.
+```bash
+python main.py
+```
 
-Export Screenshot: Save the currently visible view (3D view by default, or active fullscreen) as a high-quality .png file.
+Load an MRI (`.nii`/`.nii.gz`) and (optionally) a segmentation mask. Use the left panel controls to toggle masks, adjust window/level, apply filters, and export reports.
 
-🚀 Installation
+---
 
-Getting the viewer up and running is straightforward. Ensure you have Python 3.6+ installed and then use pip to install the required libraries:
+## Development notes & architecture
 
-pip install -r requirements.txt 
+- `src/mri_viewer.py` — main GUI, VTK integration, file IO, export orchestration, and application logic.
+- `src/utils/snapshots.py` — helpers for 2D slice rendering (Matplotlib/Agg) and 3D snapshots (PyVista & VTK versions).
+- `src/utils/*` — utility modules (style, mouse-wheel interactor, import checks, etc.).
 
+Export details:
+- The PDF export is implemented in `ExportWorker` (a `QThread`) to avoid blocking the main thread.
+- Montages are created with Pillow when available; otherwise the exporter falls back to central thumbnails.
+- The exporter supports cancellation and reports progress via a `progress` signal; the main UI shows a `QProgressBar`.
 
-Roadmap
+---
 
-[ ] Measurement Tools: Implement tools for measuring distance, area, and angles in 2D views.
+## Contribution & Roadmap
 
-[ ] ROI Analysis: Add functionality to calculate statistics (e.g., mean intensity, volume) for segmented regions.
+We welcome issues, PRs, and ideas. Possible next steps:
 
-[ ] DICOM Support: Expand file support to include loading DICOM series.
+- Measurement tools (distance/angle/ROI stats) integrated into the 2D views.
+- DICOM series import and more robust metadata handling.
+- More interactive segmentation editing and label management.
+- GPU-accelerated rendering or asynchronous IO for extremely large datasets.
 
-[ ] UI Enhancements: Custom color maps for segmentations, dockable widgets, etc.
+If you want help implementing any of the items above, open an issue or a draft PR and we can iterate together.
+
+---
+
+Enjoy exploring MRI data — and tell us what you build with it!
