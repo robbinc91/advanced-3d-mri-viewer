@@ -4,101 +4,30 @@ import traceback
 import copy
 import numpy as np
 from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QGridLayout, QGroupBox, QPushButton,
                              QLabel, QScrollArea, QStatusBar, QMessageBox,
                              QFileDialog, QSpinBox, QSlider, QCheckBox,
                              QStackedLayout, QShortcut, QSplitter, QComboBox,
-                             QDoubleSpinBox, QStyle, QSizePolicy)
+                             QDoubleSpinBox, QScrollArea)
 from PyQt5.QtGui import QKeySequence
-from style import MAIN_STYLE
-
+from src.utils.style import MAIN_STYLE, QSS_THEME
+from vtk.util import numpy_support # Add to imports
+import json
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib import colors
+import traceback
+import tempfile
+import os
+import vtk # Assuming this is already imported
 # --- Import Dependencies ---
-
-# 1. VTK
-try:
-    import vtk
-    from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
-    VTK_AVAILABLE = True
-except ImportError as e:
-    print(f"VTK import error: {e}")
-    VTK_AVAILABLE = False
-
-# 2. NiBabel (IO)
-try:
-    import nibabel as nib
-    NIBABEL_AVAILABLE = True
-except ImportError:
-    print("NiBabel not available. Install with: pip install nibabel")
-    NIBABEL_AVAILABLE = False
-
-# 3. Scikit-Image & Scipy (Advanced Processing)
-try:
-    from skimage import exposure, filters, morphology, restoration, util
-    from scipy import ndimage
-    SKIMAGE_AVAILABLE = True
-except ImportError:
-    print("Scikit-Image/Scipy not available. Advanced features disabled. Install: pip install scikit-image scipy")
-    SKIMAGE_AVAILABLE = False
-
-# 4. SimpleITK (N4 Bias Field Correction)
-try:
-    import SimpleITK as sitk
-    SIMPLEITK_AVAILABLE = True
-except ImportError:
-    print("SimpleITK not available. N4 Bias Correction disabled. Install: pip install SimpleITK")
-    SIMPLEITK_AVAILABLE = False
-
+from src.utils.check_imports import *
+from src.utils.mouse_wheel_interactor_style import MouseWheelInteractorStyle
 
 # Custom interactor style for mouse wheel navigation
-class MouseWheelInteractorStyle(vtk.vtkInteractorStyleImage):
-    def __init__(self, parent=None, view_name=None):
-        self.parent = parent
-        self.view_name = view_name
-        self.AddObserver(vtk.vtkCommand.MouseWheelForwardEvent, self.on_mouse_wheel_forward)
-        self.AddObserver(vtk.vtkCommand.MouseWheelBackwardEvent, self.on_mouse_wheel_backward)
-    
-    def on_mouse_wheel_forward(self, obj, event):
-        if self.parent and self.view_name:
-            if self.view_name == 'axial':
-                current = self.parent.axial_slider.value()
-                max_val = self.parent.axial_slider.maximum()
-                new_val = min(current + 1, max_val)
-                self.parent.axial_slider.setValue(new_val)
-                self.parent.update_axial_slice(new_val)
-            elif self.view_name == 'sagittal':
-                current = self.parent.sagittal_slider.value()
-                max_val = self.parent.sagittal_slider.maximum()
-                new_val = min(current + 1, max_val)
-                self.parent.sagittal_slider.setValue(new_val)
-                self.parent.update_sagittal_slice(new_val)
-            elif self.view_name == 'coronal':
-                current = self.parent.coronal_slider.value()
-                max_val = self.parent.coronal_slider.maximum()
-                new_val = min(current + 1, max_val)
-                self.parent.coronal_slider.setValue(new_val)
-                self.parent.update_coronal_slice(new_val)
-    
-    def on_mouse_wheel_backward(self, obj, event):
-        if self.parent and self.view_name:
-            if self.view_name == 'axial':
-                current = self.parent.axial_slider.value()
-                min_val = self.parent.axial_slider.minimum()
-                new_val = max(current - 1, min_val)
-                self.parent.axial_slider.setValue(new_val)
-                self.parent.update_axial_slice(new_val)
-            elif self.view_name == 'sagittal':
-                current = self.parent.sagittal_slider.value()
-                min_val = self.parent.sagittal_slider.minimum()
-                new_val = max(current - 1, min_val)
-                self.parent.sagittal_slider.setValue(new_val)
-                self.parent.update_sagittal_slice(new_val)
-            elif self.view_name == 'coronal':
-                current = self.parent.coronal_slider.value()
-                min_val = self.parent.coronal_slider.minimum()
-                new_val = max(current - 1, min_val)
-                self.parent.coronal_slider.setValue(new_val)
-                self.parent.update_coronal_slice(new_val)
 
 class MRIViewer(QMainWindow):
     def __init__(self):
@@ -115,6 +44,16 @@ class MRIViewer(QMainWindow):
         # Data holders
         self.mri_data = None
         self.mask_data = None
+
+        self.fileName = None
+        self.header = None
+        self.affine = None
+
+        # Persistent storage for label map
+        self.label_config_path = "label_config.json"
+        self.label_map = {} # {voxel_value (int): "Label Name" (str)}
+        self.load_label_config() # Attempt to load config on startup
+
         self.mri_header = None
         self.mri_affine = None # To store the affine matrix
         self.mask_header = None
@@ -146,7 +85,8 @@ class MRIViewer(QMainWindow):
 
         self.crosshair_actors = {'axial': [], 'sagittal': [], 'coronal': []}
         self.annotations = [] 
-        self.annotation_mode = False 
+        self.annotation_mode = False
+
 
         try:
             print("Building UI...")
@@ -159,6 +99,237 @@ class MRIViewer(QMainWindow):
             traceback.print_exc()
             QMessageBox.critical(self, "UI Error", f"Failed to build UI: {str(e)}")
             sys.exit(1)
+
+    def load_label_config(self, filepath=None):
+        """Loads the label configuration from a JSON file."""
+        if filepath:
+            self.label_config_path = filepath
+        
+        try:
+            with open(self.label_config_path, 'r') as f:
+                # Load JSON and convert keys to integers, as JSON saves them as strings
+                data = json.load(f)
+                self.label_map = {int(k): v for k, v in data.items()}
+            self.statusBar().showMessage(f"Loaded label config from: {self.label_config_path}")
+            return True
+        except FileNotFoundError:
+            self.statusBar().showMessage(f"Label config file not found. Using default empty map.")
+            self.label_map = {}
+            return False
+        except Exception as e:
+            QMessageBox.critical(self, "Config Error", f"Failed to load label config: {e}")
+            self.label_map = {}
+            return False
+
+    def save_label_config(self):
+        """Saves the current label map to the persistent JSON file."""
+        try:
+            # We save keys as strings, standard for JSON
+            with open(self.label_config_path, 'w') as f:
+                json.dump(self.label_map, f, indent=4)
+            self.statusBar().showMessage(f"Saved label config to: {self.label_config_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Config Error", f"Failed to save label config: {e}")
+
+    def prompt_load_label_config(self):
+        """Prompts the user to select and load a JSON label config file."""
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "Load Label Configuration", "", "JSON Files (*.json)"
+        )
+        if filepath:
+            self.load_label_config(filepath)
+
+    def prompt_save_label_config(self):
+        """Prompts the user to select a path to save the current label config file."""
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Save Label Configuration", self.label_config_path, "JSON Files (*.json)"
+        )
+        if filepath:
+            self.label_config_path = filepath
+            self.save_label_config()
+
+    def calculate_label_volumes(self):
+        """
+        Calculates the volume for each label found in the loaded mask_data.
+        
+        Returns:
+            A dictionary {label_name: volume_cm3}
+        """
+        if self.mask_data is None:
+            QMessageBox.warning(self, "Reporting Error", "No segmentation mask data loaded.")
+            return {}
+        
+        if self.header is None:
+            QMessageBox.warning(self, "Reporting Error", 
+                                "Cannot calculate volume: NiBabel header (voxel size) is missing.")
+            return {}
+
+        # 1. Get Voxel Dimensions
+        try:
+            # NiBabel headers store voxel sizes in qform_code/sform_code
+            # pixdim[1:4] is typically used for spatial dimensions (mm or similar)
+            voxel_dims = self.header.get_zooms()[:3]
+            voxel_volume_mm3 = voxel_dims[0] * voxel_dims[1] * voxel_dims[2]
+            # Convert mm³ to cm³ (1 cm³ = 1000 mm³)
+            voxel_volume_cm3 = voxel_volume_mm3 / 1000.0
+        except Exception as e:
+            QMessageBox.critical(self, "Volume Error", f"Failed to read voxel dimensions: {e}")
+            return {}
+
+        # 2. Count Voxels for each unique label value
+        unique_labels, counts = np.unique(self.mask_data, return_counts=True)
+        volume_results = {}
+        
+        # 3. Calculate Volume and Map Names
+        for label_val, count in zip(unique_labels, counts):
+            # Skip label 0, which is typically the background
+            if label_val == 0:
+                continue
+
+            # Get the name from the config map, or use the integer value as a fallback
+            label_name = self.label_map.get(label_val, f"Label_{label_val} (UNMAPPED)")
+            
+            # Volume = Voxel Count * Volume per Voxel
+            volume_cm3 = count * voxel_volume_cm3
+            
+            volume_results[label_name] = volume_cm3
+            
+        return volume_results
+
+    def export_volume_report(self):
+        """Calculates volumes and exports a PDF report, including images."""
+        
+        volume_results = self.calculate_label_volumes()
+        if not volume_results:
+            self.statusBar().showMessage("Export failed: No valid volumes calculated.")
+            return
+
+        # Prompt user for save location
+        default_filename = f"MRI_Volume_Report_{self.fileName or 'Untitled'}.pdf"
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Export Volume Report", default_filename, "PDF Files (*.pdf)"
+        )
+        
+        if not filepath: return
+        self.statusBar().showMessage(f"Generating PDF report: {filepath}...")
+
+        # List to hold temporary image paths for cleanup
+        temp_images = []
+        
+        try:
+            # --- START PDF GENERATION (ReportLab Structure) ---
+            from reportlab.lib.pagesizes import letter
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
+            from reportlab.lib.styles import getSampleStyleSheet
+            from reportlab.lib import colors
+
+            document = SimpleDocTemplate(filepath, pagesize=letter)
+            styles = getSampleStyleSheet()
+            story = []
+
+            # 1. Title and Metadata
+            story.append(Paragraph("NeuroView MRI Volume Report", styles['Title']))
+            story.append(Paragraph(f"<b>Source File:</b> {self.fileName or 'N/A'}", styles['Normal']))
+            story.append(Paragraph(f"<b>Mask Configuration:</b> {self.label_config_path}", styles['Normal']))
+            story.append(Spacer(1, 12))
+
+            # 2. 2D Slices with Mask Overlay
+            story.append(Paragraph("<b>2D Slices with Segmentation Mask Overlay</b>", styles['Heading2']))
+            slice_images = []
+            
+            for view in ['axial', 'coronal', 'sagittal']:
+                path = self._create_2d_slice_snapshot(view, size=(200, 200)) # Small image size
+                if path:
+                    temp_images.append(path)
+                    # Use a fixed width/height for display in PDF
+                    slice_images.append(Image(path, width=150, height=150))
+            
+            if slice_images:
+                story.append(Table([[
+                    Paragraph("Axial", styles['Code']), 
+                    Paragraph("Coronal", styles['Code']), 
+                    Paragraph("Sagittal", styles['Code'])
+                ], slice_images]))
+                story.append(Spacer(1, 12))
+
+            # 3. 3D Views - All Labels
+            if self.mask_data is not None:
+                story.append(Paragraph("<b>3D Model: All Segmented Labels</b>", styles['Heading2']))
+                all_3d_images = []
+                for i in range(3):
+                    path = self._create_3d_snapshot(label_value=None, angle_index=i, size=(200, 200))
+                    if path:
+                        temp_images.append(path)
+                        all_3d_images.append(Image(path, width=150, height=150))
+                
+                if all_3d_images:
+                    story.append(Table([all_3d_images]))
+                    story.append(Spacer(1, 12))
+
+
+            # 4. Volume Data Table
+            story.append(Paragraph("<b>Volumetric Analysis Table</b>", styles['Heading2']))
+            table_data = [["Label Name", "Volume (cm³)", "Volume (mm³)"]]
+            for name, vol_cm3 in volume_results.items():
+                vol_mm3 = vol_cm3 * 1000.0
+                table_data.append([
+                    name,
+                    f"{vol_cm3:.3f}",
+                    f"{vol_mm3:.1f}"
+                ])
+
+            table = Table(table_data)
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+            ]))
+            story.append(table)
+            story.append(Spacer(1, 12))
+            
+            # 5. 3D Views - Individual Labels
+            if self.mask_data is not None and len(volume_results) > 0:
+                story.append(Paragraph("<b>3D Models: Individual Labels</b>", styles['Heading2']))
+                
+                for label_val in self.label_map.keys():
+                    if label_val in [0] or not (self.mask_data == label_val).any():
+                        continue # Skip background or non-existent labels
+                    
+                    label_name = self.label_map.get(label_val, f"Label_{label_val}")
+                    
+                    story.append(Paragraph(f"<b>{label_name}</b>", styles['Heading3']))
+                    
+                    individual_3d_images = []
+                    for i in range(3):
+                        path = self._create_3d_snapshot(label_val, angle_index=i, size=(150, 150))
+                        if path:
+                            temp_images.append(path)
+                            individual_3d_images.append(Image(path, width=100, height=100))
+                    
+                    if individual_3d_images:
+                        story.append(Table([individual_3d_images]))
+                        story.append(Spacer(1, 6))
+
+            
+            document.build(story)
+            self.statusBar().showMessage(f"Report successfully exported to {filepath}")
+
+        except ImportError:
+            QMessageBox.critical(self, "Export Error", "PDF Library (reportlab) not found. Please install it.")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", f"An error occurred during PDF generation: {e}")
+        finally:
+            # --- Cleanup Temporary Files ---
+            for path in temp_images:
+                if os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except OSError as e:
+                        print(f"Warning: Could not delete temp file {path}: {e}")
     
     def build_ui(self):
         central_widget = QWidget()
@@ -170,18 +341,11 @@ class MRIViewer(QMainWindow):
         normal_view_widget = QWidget()
         normal_layout = QHBoxLayout(normal_view_widget)
         
-        # Use a splitter so the user can resize the left menu horizontally
-        splitter = QSplitter(Qt.Horizontal)
         left_panel = self.build_left_panel()
+        normal_layout.addWidget(left_panel, 1)
+        
         right_panel = self.build_vis_grid()
-        splitter.addWidget(left_panel)
-        splitter.addWidget(right_panel)
-        splitter.setHandleWidth(6)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 4)
-        splitter.setSizes([360, 1100])
-
-        normal_layout.addWidget(splitter)
+        normal_layout.addWidget(right_panel, 4)
         
         self.stacked_layout.addWidget(normal_view_widget)
         
@@ -189,42 +353,19 @@ class MRIViewer(QMainWindow):
         self.statusBar().showMessage("Ready")
     
     def build_left_panel(self):
-        # Create a fixed-width, scrollable left panel for many controls
         panel = QWidget()
+        panel.setObjectName("leftPanel")
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(8)
         
         # --- File Operations ---
         file_group = QGroupBox("File Operations")
-        file_group.setCheckable(True)
-        file_group.setChecked(True)
         file_layout = QVBoxLayout()
         
         self.btn_load_mri = QPushButton("Load MRI")
+        self.btn_load_mri.setObjectName("btnLoadMRI")
         self.btn_load_mask = QPushButton("Load Mask")
         self.btn_export_screenshot = QPushButton("Export Screenshot")
         self.btn_export_mri_data = QPushButton("Export Modified MRI (.nii.gz)")
-        # Set icons and shortcuts for quicker use
-        self.btn_load_mri.setToolTip("Load an MRI file (Ctrl+O)")
-        self.btn_load_mask.setToolTip("Load a mask file (Ctrl+M)")
-        self.btn_export_screenshot.setToolTip("Export screenshot (Ctrl+P)")
-        self.btn_export_mri_data.setToolTip("Export modified MRI (Ctrl+S)")
-
-        open_icon = QApplication.style().standardIcon(QStyle.SP_DialogOpenButton)
-        save_icon = QApplication.style().standardIcon(QStyle.SP_DialogSaveButton)
-        pic_icon = QApplication.style().standardIcon(QStyle.SP_FileDialogDetailedView)
-        mask_icon = QApplication.style().standardIcon(QStyle.SP_DirOpenIcon)
-
-        self.btn_load_mri.setIcon(open_icon)
-        self.btn_load_mask.setIcon(mask_icon)
-        self.btn_export_screenshot.setIcon(pic_icon)
-        self.btn_export_mri_data.setIcon(save_icon)
-
-        self.btn_load_mri.setShortcut('Ctrl+O')
-        self.btn_load_mask.setShortcut('Ctrl+M')
-        self.btn_export_screenshot.setShortcut('Ctrl+P')
-        self.btn_export_mri_data.setShortcut('Ctrl+S')
         
         file_layout.addWidget(self.btn_load_mri)
         file_layout.addWidget(self.btn_load_mask)
@@ -234,8 +375,6 @@ class MRIViewer(QMainWindow):
         
         # --- Clinical Image Processing ---
         proc_group = QGroupBox("Clinical Image Processing")
-        proc_group.setCheckable(True)
-        proc_group.setChecked(True)
         proc_layout = QVBoxLayout()
         
         # 1. Parameter Input (General)
@@ -357,8 +496,6 @@ class MRIViewer(QMainWindow):
 
         # --- Mask Controls ---
         mask_group = QGroupBox("Mask Controls")
-        mask_group.setCheckable(True)
-        mask_group.setChecked(True)
         mask_layout = QVBoxLayout()
         
         self.show_mask_check = QCheckBox("Show Mask")
@@ -378,10 +515,33 @@ class MRIViewer(QMainWindow):
         mask_layout.addLayout(mask_opacity_layout)
         mask_group.setLayout(mask_layout)
         
+
+        # --- Optimization 4: Window/Level Presets ---
+        #wl_group = QGroupBox("Window / Level (Contrast)")
+        #wl_layout = QVBoxLayout()
+        
+        #wl_layout.addWidget(QLabel("Clinical Presets:"))
+        #self.combo_wl = QComboBox()
+        #self.combo_wl.addItems([
+        #    "Select Preset...",
+        #    "Full Dynamic Range (Default)",
+        #    "Brain (High Contrast)",
+        #    "Soft Tissue (Wide)",
+        #    "Bone / Hard Structure",
+        #    "Stroke (Narrow)",
+        #])
+        #self.combo_wl.currentIndexChanged.connect(self.apply_wl_preset)
+        #wl_layout.addWidget(self.combo_wl)
+        
+        # Add a custom slider for manual W/L fine tuning if desired
+        # (For brevity, just the dropdown is shown here)
+        
+        #wl_group.setLayout(wl_layout)
+        #layout.addWidget(wl_group) # Add to main left panel layout
+
+
         # --- Rendering Options ---
         render_group = QGroupBox("Rendering Options")
-        render_group.setCheckable(True)
-        render_group.setChecked(True)
         render_layout = QVBoxLayout()
         
         self.volume_rendering_check = QCheckBox("Volume Rendering")
@@ -392,8 +552,6 @@ class MRIViewer(QMainWindow):
         render_group.setLayout(render_layout)
 
         annotation_group = QGroupBox("Annotations")
-        annotation_group.setCheckable(True)
-        annotation_group.setChecked(True)
         anno_layout = QVBoxLayout()
         
         self.btn_toggle_anno = QPushButton("Toggle Annotation Mode")
@@ -407,35 +565,32 @@ class MRIViewer(QMainWindow):
         layout.addWidget(proc_group)
         layout.addWidget(mask_group)
         layout.addWidget(render_group)
-        layout.addWidget(annotation_group)
+        #layout.addWidget(annotation_group)
         layout.addStretch()
 
-        # Make groups collapsible by toggling visibility of their internal widgets
-        def make_collapsible(group: QGroupBox, inner_layout: QVBoxLayout):
-            def on_toggle(checked):
-                for i in range(inner_layout.count()):
-                    w = inner_layout.itemAt(i).widget()
-                    if w:
-                        w.setVisible(checked)
-            group.toggled.connect(on_toggle)
+        # --- NEW: Reporting & Configuration Group ---
+        report_group = QGroupBox("Reporting & Configuration")
+        report_layout = QVBoxLayout()
+        # Button to load a custom JSON label config
+        btn_load_config = QPushButton("Load Label Config (JSON)")
+        btn_load_config.clicked.connect(self.prompt_load_label_config)
+        report_layout.addWidget(btn_load_config)
+        # Button to save the current label config
+        btn_save_config = QPushButton("Save Current Label Config")
+        btn_save_config.clicked.connect(self.prompt_save_label_config)
+        report_layout.addWidget(btn_save_config)
+        report_layout.addWidget(QLabel("---"))
+        # Button to export the final PDF report
+        self.btn_export_report = QPushButton("Export Volume Report (PDF)")
+        self.btn_export_report.clicked.connect(self.export_volume_report)
+        # You may want to disable this if self.mask_data is None
+        report_layout.addWidget(self.btn_export_report)
 
-        make_collapsible(file_group, file_layout)
-        make_collapsible(proc_group, proc_layout)
-        make_collapsible(mask_group, mask_layout)
-        make_collapsible(render_group, render_layout)
-        make_collapsible(annotation_group, anno_layout)
+        report_group.setLayout(report_layout)
+        layout.addWidget(report_group)
+        layout.addStretch()
 
-        # Wrap left panel in a scroll area; disable horizontal scrollbar and allow adjustable width
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(panel)
-        scroll.setObjectName('left_panel_scroll')
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setMinimumWidth(220)
-        scroll.setMaximumWidth(800)
-        scroll.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
-        scroll.setStyleSheet("QScrollArea#left_panel_scroll { border: 1px solid #333; background: transparent; }")
         
         # Connect signals
         self.btn_load_mri.clicked.connect(self.load_mri)
@@ -443,8 +598,68 @@ class MRIViewer(QMainWindow):
         self.btn_export_screenshot.clicked.connect(self.export_screenshot)
         self.btn_export_mri_data.clicked.connect(self.export_modified_mri)
         self.btn_to_int.clicked.connect(self.convert_to_integer_labels) # NEW CONNECTION
+        
 
-        return scroll
+        
+        return panel
+
+    def apply_wl_preset(self, index):
+        """
+        Optimization 4: Applies Window/Level presets using percentiles.
+        This is more robust for MRI than hardcoded values.
+        """
+        if self.mri_data is None: return
+        txt = self.combo_wl.currentText()
+        if "Select" in txt: return
+
+        data = self.mri_data
+        # Calculate percentiles for robust min/max ignoring outliers
+        p_min, p_max = np.min(data), np.max(data)
+        p1, p99 = np.percentile(data, (1, 99))
+        mean_val = np.mean(data)
+        
+        # Determine Target Window (Width) and Level (Center)
+        if "Full Dynamic Range" in txt:
+            target_window = p_max - p_min
+            target_level = (p_max + p_min) / 2
+            
+        elif "Brain" in txt:
+            # High contrast: Focus on the middle 80% of data
+            # Narrower window = Higher contrast
+            target_window = (p99 - p1) * 0.6 
+            target_level = mean_val
+            
+        elif "Soft Tissue" in txt:
+            # Wider window to see variations
+            target_window = (p99 - p1) * 1.2
+            target_level = mean_val
+            
+        elif "Stroke" in txt:
+            # Very narrow window to distinguish slight intensity changes
+            target_window = (p99 - p1) * 0.3
+            target_level = mean_val
+            
+        elif "Bone" in txt:
+            # Focus on the very bright signals
+            target_window = (p_max - p_min) * 0.3
+            target_level = p99
+            
+        else:
+            return
+
+        # Apply to all 2D Views
+        for view in ['axial', 'sagittal', 'coronal']:
+            renderer = self.renderers[view]
+            actors = renderer.GetActors()
+            actors.InitTraversal()
+            actor = actors.GetNextActor()
+            # The first actor is usually the MRI ImageActor
+            if actor:
+                actor.GetProperty().SetColorWindow(target_window)
+                actor.GetProperty().SetColorLevel(target_level)
+                
+        self.update_2d_views()
+        self.statusBar().showMessage(f"Applied Preset: {txt} (W: {target_window:.1f}, L: {target_level:.1f})")
     
     def toggle_clahe_controls(self, index):
         # Index 2 is CLAHE (due to separator)
@@ -525,63 +740,46 @@ class MRIViewer(QMainWindow):
             
         self.statusBar().showMessage("Undo successful.")
 
+    
+
     def update_vtk_data(self):
-        """Refreshes the VTK ImageData from self.mri_data numpy array."""
+        """Refreshes the VTK ImageData from self.mri_data numpy array using numpy_support."""
         if self.mri_data is None: return
-        
-        depth, height, width = self.mri_data.shape
-        
-        # Determine the VTK scalar type dynamically
+
+        # 1. Normalize Data Types for VTK
+        # VTK is sensitive to C-contiguous vs Fortran-contiguous arrays. 
+        # We transpose to match VTK's coordinate system if necessary, but typically
+        # flattening C-ordered numpy matches VTK point data if dimensions are set right.
         if self.mri_data.dtype == np.uint16:
             vtk_type = vtk.VTK_UNSIGNED_SHORT
         else:
-            vtk_type = vtk.VTK_FLOAT # Default for general data
-        
-        # --- FIX START ---
-        # Initialize self.image_data if it's None, or reallocate if type/size needs changing
-        needs_reallocation = self.image_data is None
-        
-        if not needs_reallocation:
-            # Safely check existing object properties if it's not None
-            current_dims = self.image_data.GetDimensions()
-            expected_dims = (width, height, depth)
-            
-            if (self.image_data.GetScalarType() != vtk_type or 
-                current_dims != expected_dims):
-                needs_reallocation = True
+            self.mri_data = self.mri_data.astype(np.float32) # Standardize float
+            vtk_type = vtk.VTK_FLOAT
 
-        if needs_reallocation:
+        depth, height, width = self.mri_data.shape # Z, Y, X order in Numpy
+
+        # 2. Efficiently create/update VTK object
+        if self.image_data is None:
             self.image_data = vtk.vtkImageData()
-            self.image_data.SetDimensions(width, height, depth) # X, Y, Z
-            self.image_data.AllocateScalars(vtk_type, 1)
-        # --- FIX END ---
+        
+        self.image_data.SetDimensions(width, height, depth) # VTK uses X, Y, Z
+        self.image_data.AllocateScalars(vtk_type, 1)
 
-        # Flatten loop for update
-        for z in range(depth):
-            for y in range(height):
-                for x in range(width):
-                    # Use SetScalarComponentFromDouble for flexibility, even with integer data
-                    val = float(self.mri_data[z, y, x])
-                    self.image_data.SetScalarComponentFromDouble(x, y, z, 0, val)
+        # 3. The "Magic": Convert Numpy -> VTK without loops
+        # ravel(order='C') flattens row-major. 
+        # Note: You might need to check if your view is flipped. 
+        # If so, use np.flip() on the axis before flattening.
+        flat_data = self.mri_data.ravel(order='C') 
+        vtk_array = numpy_support.numpy_to_vtk(num_array=flat_data, deep=True, array_type=vtk_type)
+        self.image_data.GetPointData().SetScalars(vtk_array)
         
         self.image_data.Modified()
-        
-        # Update 3D volume histogram
+
+        # Update Histogram/Transfer Functions (Keep your existing logic here)
         if self.volume_property:
             min_val = np.min(self.mri_data)
             max_val = np.max(self.mri_data)
-            
-            color_tf = self.volume_property.GetRGBTransferFunction()
-            color_tf.RemoveAllPoints()
-            color_tf.AddRGBPoint(min_val, 0.0, 0.0, 0.0)
-            color_tf.AddRGBPoint(max_val, 1.0, 1.0, 1.0)
-            
-            opacity_tf = self.volume_property.GetScalarOpacity()
-            opacity_tf.RemoveAllPoints()
-            opacity_tf.AddPoint(min_val, 0.0)
-            opacity_tf.AddPoint(max_val * 0.2, 0.0)
-            opacity_tf.AddPoint(max_val * 0.7, 0.2)
-            opacity_tf.AddPoint(max_val, 0.8)
+            # ... (Rest of your transfer function logic) ...
 
         self.update_2d_views()
         self.vtk_widgets['3d'].GetRenderWindow().Render()
@@ -624,6 +822,33 @@ class MRIViewer(QMainWindow):
             traceback.print_exc()
             return data # Return original data on failure
 
+
+    def set_window_level(self, preset):
+        # Example for CT (Hounsfield Units) or normalized MRI
+        presets = {
+            'Brain': (80, 40), # Window 80, Level 40
+            'Bone': (2000, 500),
+            'Soft Tissue': (400, 50)
+        }
+        if preset in presets:
+            w, l = presets[preset]
+            # In VTK, ColorWindow = w, ColorLevel = l
+            for view in ['axial', 'sagittal', 'coronal']:
+                actors = self.renderers[view].GetActors()
+                actors.InitTraversal()
+                actor = actors.GetNextActor()
+                if actor:
+                    actor.GetProperty().SetColorWindow(w)
+                    actor.GetProperty().SetColorLevel(l)
+            self.update_2d_views()
+
+    def on_processing_finished(self, new_data):
+        self.setCursor(Qt.ArrowCursor)
+        self.push_to_history()
+        self.mri_data = new_data
+        self.update_vtk_data()
+        self.statusBar().showMessage("Processing Complete")
+        
     def apply_histogram_op(self):
         if self.mri_data is None: return
         if not SKIMAGE_AVAILABLE and "N4" not in self.combo_hist.currentText():
@@ -641,7 +866,7 @@ class MRIViewer(QMainWindow):
         min_v = np.min(data)
         max_v = np.max(data)
         param = self.proc_param_spin.value()
-        
+                    
         try:
             # --- BIAS FIELD CORRECTION ---
             if "N4 Bias Field Correction" in txt:
@@ -936,7 +1161,7 @@ class MRIViewer(QMainWindow):
         interactor_style = vtk.vtkInteractorStyleTrackballCamera()
         interactor_style.SetDefaultRenderer(self.renderers['3d'])
         
-        def on_left_click(obj, event):
+        def on_right_click(obj, event):
             if not self.annotation_mode:
                 obj.OnLeftButtonDown() 
                 return
@@ -959,7 +1184,7 @@ class MRIViewer(QMainWindow):
             self.vtk_widgets['3d'].GetRenderWindow().Render()
 
         self.vtk_widgets['3d'].SetInteractorStyle(interactor_style)
-        interactor_style.AddObserver(vtk.vtkCommand.LeftButtonPressEvent, on_left_click)
+        interactor_style.AddObserver(vtk.vtkCommand.RightButtonPressEvent, on_right_click)
 
     def _prompt_and_add_annotation(self, image_idx):
         from PyQt5.QtWidgets import QInputDialog
@@ -1078,13 +1303,7 @@ class MRIViewer(QMainWindow):
     def build_vis_grid(self):
         grid_widget = QWidget()
         grid = QGridLayout(grid_widget)
-        grid.setSpacing(4)
-        grid_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        # Make grid rows/columns stretch so children expand
-        grid.setRowStretch(0, 1)
-        grid.setRowStretch(1, 1)
-        grid.setColumnStretch(0, 1)
-        grid.setColumnStretch(1, 1)
+        grid.setSpacing(2)
 
         self.view_grid = grid
         self.view_grid_positions = {
@@ -1099,7 +1318,6 @@ class MRIViewer(QMainWindow):
             view_panel_layout = QVBoxLayout(view_panel)
             view_panel_layout.setContentsMargins(2, 2, 2, 2)
             view_panel_layout.setSpacing(2)
-            view_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
             title_bar = QWidget()
             title_bar_layout = QHBoxLayout(title_bar)
@@ -1126,12 +1344,10 @@ class MRIViewer(QMainWindow):
             content_layout = QHBoxLayout(content_area)
             content_layout.setContentsMargins(0, 0, 0, 0)
             content_layout.setSpacing(2)
-            content_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
             vtk_widget = QVTKRenderWindowInteractor()
-            vtk_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             renderer = vtk.vtkRenderer()
-            renderer.SetBackground(0.1, 0.1, 0.1)
+            renderer.SetBackground(0, 0, 0)
             renderer.SetUseDepthPeeling(True)
             renderer.SetMaximumNumberOfPeels(100)
             renderer.SetOcclusionRatio(0.1)
@@ -1153,7 +1369,6 @@ class MRIViewer(QMainWindow):
                 scroll_bar.setValue(50)
                 scroll_bar.setTickPosition(QSlider.TicksBothSides)
                 scroll_bar.setTickInterval(10)
-                scroll_bar.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Expanding)
                 
                 if view_name == 'axial':
                     self.axial_slider = scroll_bar
@@ -1174,7 +1389,9 @@ class MRIViewer(QMainWindow):
         return grid_widget
 
     def apply_style(self):
-        self.setStyleSheet(MAIN_STYLE)
+        #self.setStyleSheet(MAIN_STYLE)
+        self.setStyleSheet(QSS_THEME)
+
     
     def setup_shortcuts(self):
         self.exit_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), self)
@@ -1220,9 +1437,14 @@ class MRIViewer(QMainWindow):
             self.btn_undo.setEnabled(False)
             
             img = nib.load(filepath)
+            #img = nib.as_closest_canonical(img)
+
             self.mri_data = img.get_fdata()
             self.mri_header = img.header
             self.mri_affine = img.affine # Store the affine matrix from the image object
+
+            self.header = img.header
+            self.affine = img.affine
             
             depth, height, width = self.mri_data.shape
             
@@ -1267,6 +1489,9 @@ class MRIViewer(QMainWindow):
             self.statusBar().showMessage(f"Loading mask from: {filepath}")
             img = nib.load(filepath)
             mask_data = img.get_fdata()
+
+            #self.header = mask_img.header
+            #self.affine = mask_img.affine
             
             if mask_data.shape != self.mri_data.shape:
                 QMessageBox.critical(self, "Error", 
@@ -1410,6 +1635,21 @@ class MRIViewer(QMainWindow):
         
         self.volume_mapper = vtk.vtkSmartVolumeMapper()
         self.volume_mapper.SetInputData(self.image_data)
+        self.volume_mapper.SetRequestedRenderModeToGPU() # Request GPU raycasting
+
+        def StartInteraction(obj, event):
+            self.volume_mapper.SetAutoAdjustSampleDistances(1)
+            self.volume_mapper.SetInteractiveUpdateRate(5.0) # Allow dropping frames to keep up
+            
+        # High quality render when stopped
+        def EndInteraction(obj, event):
+            self.volume_mapper.SetAutoAdjustSampleDistances(0)
+            self.vtk_widgets['3d'].GetRenderWindow().Render()
+
+        # Attach to the 3D interactor
+        interactor = self.vtk_widgets['3d'].GetRenderWindow().GetInteractor()
+        interactor.AddObserver("StartInteractionEvent", StartInteraction)
+        interactor.AddObserver("EndInteractionEvent", EndInteraction)
         
         self.volume = vtk.vtkVolume()
         self.volume.SetMapper(self.volume_mapper)
@@ -1564,8 +1804,9 @@ class MRIViewer(QMainWindow):
         self.vtk_widgets['coronal'].GetRenderWindow().Render()
         self._update_crosshair_sync()
     
+            
     def _create_crosshair_actor(self, x_pos, y_pos, x_max, y_max):
-        crosshair_color = (1.0, 1.0, 0.0)
+        crosshair_color = (0.05, 0.65, 0.9)
         line_width = 2
         
         points = vtk.vtkPoints()
@@ -1626,6 +1867,7 @@ class MRIViewer(QMainWindow):
 
         for view_name in ['axial', 'sagittal', 'coronal']:
             self.vtk_widgets[view_name].GetRenderWindow().Render()
+
 
     def toggle_rendering_mode(self, state):
         if self.volume is None: return
@@ -1698,26 +1940,253 @@ class MRIViewer(QMainWindow):
             if vtk_widget:
                 QTimer.singleShot(100, lambda: vtk_widget.GetRenderWindow().Render())
 
-if __name__ == '__main__':
-    def excepthook(exc_type, exc_value, exc_tb):
-        tb = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
-        print("Error details:", tb)
-        QMessageBox.critical(None, "Fatal Error", f"An unhandled error occurred: {exc_value}\n\nSee console for details.")
-        sys.exit(1)
+    def _get_representative_slice_index(self):
+        """Returns a central index for all three axes."""
+        if self.mri_data is None: return {'axial': 0, 'coronal': 0, 'sagittal': 0}
+        D, H, W = self.mri_data.shape # Z, Y, X
+        return {
+            'axial': D // 2,
+            'coronal': H // 2,
+            'sagittal': W // 2,
+        }
+
+    def _create_2d_slice_snapshot(self, view_name, size=(300, 300)):
+        """
+        Generates a 2D snapshot of the specified central slice with mask overlay
+        using vtkImageReslice to ensure orientation is correctly handled.
+        Returns the path to the saved PNG image.
+        """
+        if self.mri_data is None: return None
+
+        indices = self._get_representative_slice_index()
+        z_idx, y_idx, x_idx = indices['axial'], indices['coronal'], indices['sagittal']
         
-    sys.excepthook = excepthook
+        # 1. Setup Off-Screen Renderer
+        renderWindow = vtk.vtkRenderWindow()
+        renderWindow.SetOffScreenRendering(1)
+        renderWindow.SetSize(size)
+        renderer = vtk.vtkRenderer()
+        renderWindow.AddRenderer(renderer)
+        
+        # 2. Base Importer for MRI Data
+        importer = vtk.vtkImageImport()
+        mri_data_contiguous = self.mri_data.copy()
+        importer.SetImportVoidPointer(mri_data_contiguous, mri_data_contiguous.nbytes)
+        importer.SetDataScalarTypeToFloat()
+        importer.SetNumberOfScalarComponents(1)
+        # Note: Assuming VTK input order X, Y, Z (W, H, D in numpy shape)
+        importer.SetDataExtent(0, self.mri_data.shape[2] - 1, 
+                               0, self.mri_data.shape[1] - 1, 
+                               0, self.mri_data.shape[0] - 1)
+        importer.SetWholeExtent(importer.GetDataExtent())
+        importer.Update()
+        
+        # 3. Setup Reslice Transformation Matrix
+        # This matrix defines the coordinate system of the slice plane.
+        matrix = vtk.vtkMatrix4x4()
+        matrix.Identity() 
 
-    app = QApplication(sys.argv)
-    if not VTK_AVAILABLE:
-        QMessageBox.critical(None, "Error", "VTK is not properly installed or configured.")
-        sys.exit(1)
+        # The reslicer extracts a single slice from the new Z=0 plane (default).
+        # We manipulate the matrix's translation component (column 3) to select the desired slice index.
+        
+        if view_name == 'axial':
+            # Axial (Z-slice). Keep X, Y, Z axes, just translate Z to the desired slice index.
+            matrix.SetElement(2, 3, z_idx) 
+        
+        elif view_name == 'coronal':
+            # Coronal (Y-slice). Map X -> X, Z -> -Y, Y -> Z.
+            matrix.SetElement(1, 1, 0)
+            matrix.SetElement(1, 2, -1)  # Z-axis becomes the negative Y-axis of the slice
+            matrix.SetElement(2, 1, 1)   # Y-axis becomes the Z-axis of the slice
+            matrix.SetElement(2, 3, y_idx) # Translate along the new Z-axis (which was Y)
+            
+        elif view_name == 'sagittal':
+            # Sagittal (X-slice). Map Y -> X, X -> -Y, Z -> Z.
+            matrix.SetElement(0, 0, 0)
+            matrix.SetElement(0, 1, 1)   # Y-axis becomes the X-axis of the slice
+            matrix.SetElement(1, 0, -1)  # X-axis becomes the negative Y-axis of the slice
+            matrix.SetElement(2, 3, x_idx) # Translate along the new Z-axis (which was X)
 
-    if not NIBABEL_AVAILABLE:
-        print("WARNING: NiBabel not found. File loading/saving will be disabled.")
-    
-    if not SIMPLEITK_AVAILABLE:
-        print("WARNING: SimpleITK not found. N4 Bias Field Correction will be disabled.")
+        # 4. Apply Reslice Filter to MRI Data
+        reslice_mri = vtk.vtkImageReslice()
+        reslice_mri.SetInputConnection(importer.GetOutputPort())
+        reslice_mri.SetResliceAxes(matrix)
+        reslice_mri.SetOutputDimensionality(2) # Ensures we get a 2D plane
+        reslice_mri.Update()
+        
+        # 5. Add MRI Slice Actor
+        slice_actor = vtk.vtkImageActor()
+        slice_actor.GetMapper().SetInputConnection(reslice_mri.GetOutputPort())
+        renderer.AddActor(slice_actor)
+        
+        # 6. Handle Mask Overlay
+        if self.mask_data is not None:
+            # Re-run the reslice with the mask data
+            mask_importer = vtk.vtkImageImport()
+            mask_data_contiguous = self.mask_data.copy()
+            mask_importer.SetImportVoidPointer(mask_data_contiguous, mask_data_contiguous.nbytes)
+            mask_importer.SetDataScalarTypeToUnsignedShort()
+            mask_importer.SetNumberOfScalarComponents(1)
+            mask_importer.SetDataExtent(importer.GetDataExtent())
+            mask_importer.SetWholeExtent(importer.GetDataExtent())
+            mask_importer.Update()
+            
+            # Apply Reslice Filter to Mask Data (using the same matrix)
+            reslice_mask = vtk.vtkImageReslice()
+            reslice_mask.SetInputConnection(mask_importer.GetOutputPort())
+            reslice_mask.SetResliceAxes(matrix)
+            reslice_mask.SetOutputDimensionality(2)
+            reslice_mask.Update()
+            
+            # Color the mask data
+            mask_lut = vtk.vtkLookupTable()
+            mask_lut.SetNumberOfTableValues(256)
+            mask_lut.Build()
+            mask_lut.SetTableValue(1, 1.0, 0.0, 0.0, 0.6)
+            mask_lut.SetTableValue(2, 0.0, 1.0, 0.0, 0.6)
+            mask_lut.SetTableValue(3, 0.0, 0.0, 1.0, 0.6)
 
-    viewer = MRIViewer()
-    viewer.show()
-    sys.exit(app.exec_())
+            mask_colorer = vtk.vtkImageMapToColors()
+            mask_colorer.SetInputConnection(reslice_mask.GetOutputPort()) # Use reslice output
+            mask_colorer.SetLookupTable(mask_lut)
+            mask_colorer.PassAlphaToOutputOn()
+            
+            # Add Mask Actor (using vtkImageSlice for alpha blending)
+            mask_mapper = vtk.vtkImageSliceMapper()
+            mask_mapper.SetInputConnection(mask_colorer.GetOutputPort())
+            mask_actor = vtk.vtkImageSlice()
+            mask_actor.SetMapper(mask_mapper)
+            renderer.AddActor(mask_actor)
+
+
+        # 7. Finalize Camera and Snapshot
+        renderer.ResetCamera()
+        renderer.Render()
+        
+        w2if = vtk.vtkWindowToImageFilter()
+        w2if.SetInput(renderWindow)
+        w2if.Update()
+
+        temp_path = os.path.join(tempfile.gettempdir(), f"slice_{view_name}.png")
+        writer = vtk.vtkPNGWriter()
+        writer.SetFileName(temp_path)
+        writer.SetInputConnection(w2if.GetOutputPort())
+        writer.Write()
+        
+        # Clean up
+        renderer.RemoveAllViewProps()
+        renderWindow.Finalize()
+        del renderWindow, renderer, w2if, writer
+        
+        return temp_path
+
+    def _create_3d_snapshot(self, label_value=None, angle_index=0, size=(400, 400)):
+        """
+        Generates a 3D snapshot from a specific angle.
+        label_value=None renders all labels.
+        angle_index (0, 1, 2) corresponds to a different camera view.
+        Returns the path to the saved PNG image.
+        """
+        if self.mask_data is None: return None
+
+        # 1. Setup Off-Screen Renderer
+        renderWindow = vtk.vtkRenderWindow()
+        renderWindow.SetOffScreenRendering(1)
+        renderWindow.SetSize(size)
+        renderer = vtk.vtkRenderer()
+        renderWindow.AddRenderer(renderer)
+        renderer.SetBackground(0.0, 0.0, 0.0) # Black background
+
+        # 2. Filter Mask Data for Label (if specified)
+        if label_value is not None:
+            # Create a binary array where only the target label is 1
+            data_to_render = (self.mask_data == label_value).astype(np.float32)
+        else:
+            # Render all labels (using the mask data itself, converted to float)
+            data_to_render = self.mask_data.astype(np.float32)
+            
+        # --- FIX: Ensure Contiguity for the data being passed to Marching Cubes ---
+        data_to_render_contiguous = data_to_render.copy()
+        # --------------------------------------------------------------------------
+
+        # 3. VTK Pipeline (Marching Cubes for Surface)
+        importer = vtk.vtkImageImport()
+        importer.SetDataScalarTypeToFloat()
+        importer.SetNumberOfScalarComponents(1)
+        
+        # Use the contiguous copy
+        importer.SetImportVoidPointer(data_to_render_contiguous, data_to_render_contiguous.nbytes)
+        
+        importer.SetDataExtent(0, data_to_render.shape[2] - 1, 
+                               0, data_to_render.shape[1] - 1, 
+                               0, data_to_render.shape[0] - 1)
+        importer.SetWholeExtent(importer.GetDataExtent())
+        importer.Update()
+        
+        # ... (rest of the VTK pipeline remains the same) ...
+        
+        # Use Marching Cubes to extract the surface
+        mc = vtk.vtkMarchingCubes()
+        mc.SetInputConnection(importer.GetOutputPort())
+        mc.SetValue(0, 0.5) # Isosurface at 0.5 (separating 0 from 1)
+        
+        # Smoother appearance
+        smoother = vtk.vtkSmoothPolyDataFilter()
+        smoother.SetInputConnection(mc.GetOutputPort())
+        smoother.SetNumberOfIterations(10)
+        
+        # Mapper and Actor
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputConnection(smoother.GetOutputPort())
+        
+        actor = vtk.vtkActor()
+        actor.SetMapper(mapper)
+        
+        # Set color based on label (e.g., green for all/unknown, specific color for individual)
+        if label_value is None:
+            actor.GetProperty().SetColor(0.2, 0.8, 0.2) # Light Green for All
+        else:
+            # Simple color mapping for individual labels
+            hue = (label_value * 0.6180339887) % 1.0 # Golden ratio color
+            color = vtk.vtkColorTransferFunction()
+            color.AddRGBPoint(0.0, 1.0, 1.0, 1.0)
+            color.AddRGBPoint(1.0, hue, 1.0 - hue, 0.5)
+            r, g, b = color.GetColor(1.0)
+            actor.GetProperty().SetColor(r, g, b)
+            
+        renderer.AddActor(actor)
+
+        # 4. Camera Setup
+        renderer.ResetCamera()
+        camera = renderer.GetActiveCamera()
+        
+        # Define 3 distinct viewing angles
+        angles = [
+            (0, 0, 0),        # Front View
+            (45, 15, 0),      # Oblique Top-Right View
+            (90, 0, 0),       # Left Profile View
+        ]
+        
+        az, el, roll = angles[angle_index % 3]
+        camera.Azimuth(az)
+        camera.Elevation(el)
+        camera.Roll(roll)
+        renderer.ResetCameraClippingRange()
+        renderer.Render()
+
+        # 5. Snapshot and Cleanup
+        w2if = vtk.vtkWindowToImageFilter()
+        w2if.SetInput(renderWindow)
+        w2if.Update()
+
+        temp_path = os.path.join(tempfile.gettempdir(), f"3d_{label_value or 'all'}_{angle_index}.png")
+        writer = vtk.vtkPNGWriter()
+        writer.SetFileName(temp_path)
+        writer.SetInputConnection(w2if.GetOutputPort())
+        writer.Write()
+        
+        renderer.RemoveAllViewProps()
+        renderWindow.Finalize()
+        del renderWindow, renderer, w2if, writer
+        
+        return temp_path
