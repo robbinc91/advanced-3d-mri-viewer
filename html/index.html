@@ -118,6 +118,16 @@
                     <button id="btn-save-label-config" class="py-2 px-3 rounded text-white font-medium bg-amber-700 hover:bg-amber-600 transition-colors">Save Label Config</button>
                 </div>
 
+                <!-- Label Colors (dynamic) -->
+                <div id="label-colors-section" class="pt-3">
+                    <h2 class="text-xs font-bold text-neutral-400 uppercase tracking-wider">Label Colors</h2>
+                    <div id="label-colors" class="mt-2 space-y-2 text-sm text-white"></div>
+                    <div class="mt-2 grid grid-cols-2 gap-2">
+                        <button id="btn-reset-label-colors" class="py-2 px-3 rounded text-white font-medium bg-neutral-700 hover:bg-neutral-600 transition-colors">Reset Colors</button>
+                        <button id="btn-refresh-label-colors" class="py-2 px-3 rounded text-white font-medium bg-sky-600 hover:bg-sky-500 transition-colors">Refresh</button>
+                    </div>
+                </div>
+
                 <button id="btn-calc-volumes" class="w-full mt-2 py-2 px-3 rounded text-neutral-300 font-medium bg-neutral-800 hover:bg-neutral-700 transition-colors border border-neutral-700">Calculate Volumes</button>
 
                 <div id="loading-indicator" class="hidden text-xs text-center text-yellow-500 font-mono animate-pulse">
@@ -184,6 +194,14 @@
                         <option value="cool">Cool Blue</option>
                         <option value="rainbow">Rainbow</option>
                     </select>
+                </div>
+                <div class="space-y-1 pt-2">
+                    <label class="text-neutral-300 block mb-1">Render Quality</label>
+                    <div class="flex items-center gap-2">
+                        <input id="input-render-quality" type="range" min="1" max="100" step="1" value="70" class="flex-1">
+                        <span id="val-render-quality" class="w-10 text-right font-mono text-sky-400">70</span>
+                    </div>
+                    <p class="text-xs text-neutral-500 mt-1">Higher = better visuals, lower = faster performance.</p>
                 </div>
             </div>
 
@@ -349,7 +367,8 @@ const state = {
         invert: false,
         colorMap: 'grayscale',
         showMask: true,
-        maskOpacity: 0.5
+        maskOpacity: 0.5,
+        renderQuality: 70
     },
     ui: {
         rotate3D: { x: 0, y: 0 },
@@ -485,6 +504,7 @@ async function handleMaskLoad(file) {
         
         state.mask = mask;
         els.labels.maskGroup.classList.remove('opacity-50', 'pointer-events-none');
+        populateLabelColorUI();
         renderAll();
         render3D();
     } catch (err) {
@@ -503,10 +523,15 @@ async function handleLabelConfigLoad(file) {
         const map = {};
         for (const k of Object.keys(json)) {
             const ik = parseInt(k, 10);
-            map[ik] = json[k];
+            const val = json[k];
+            // Support legacy format (string -> name) or new format (object with name and/or color)
+            if (typeof val === 'string') map[ik] = { name: val };
+            else if (typeof val === 'object' && val !== null) map[ik] = val;
+            else map[ik] = { name: String(val) };
         }
         state.labelMap = map;
         alert('Label configuration loaded. ' + Object.keys(map).length + ' entries.');
+        populateLabelColorUI();
     } catch (err) {
         alert('Failed to load label config: ' + err.message);
     }
@@ -551,7 +576,12 @@ function calculateVolumes() {
     rows.push('<tr><th>Label</th><th>Name</th><th>Voxels</th><th>Volume (cm³)</th></tr>');
     for (const [label, cnt] of counts.entries()) {
         const vol_cm3 = (cnt * voxel_mm3) / 1000.0;
-        const name = state.labelMap[label] || ('Label_' + label);
+        let name = 'Label_' + label;
+        if (state.labelMap && state.labelMap[label]) {
+            const entry = state.labelMap[label];
+            if (typeof entry === 'string') name = entry;
+            else if (typeof entry === 'object' && entry.name) name = entry.name;
+        }
         rows.push(`<tr><td>${label}</td><td>${name}</td><td>${cnt}</td><td>${vol_cm3.toFixed(3)}</td></tr>`);
     }
 
@@ -648,6 +678,143 @@ function getMaskColor(val) {
     return colors[idx];
 }
 
+function getLabelRgb(val) {
+    if (val <= 0) return null;
+    if (state.labelMap && state.labelMap[val]) {
+        const entry = state.labelMap[val];
+        if (typeof entry === 'object' && entry !== null && entry.color) {
+            const parsed = parseHexColor(entry.color);
+            if (parsed) return parsed;
+        }
+    }
+    return getMaskColor(val);
+}
+function parseHexColor(str) {
+    if (!str) return null;
+    str = String(str).trim();
+    if (str.startsWith('#')) {
+        let s = str.slice(1);
+        if (s.length === 3) s = s.split('').map(ch => ch + ch).join('');
+        if (s.length !== 6) return null;
+        const r = parseInt(s.slice(0, 2), 16);
+        const g = parseInt(s.slice(2, 4), 16);
+        const b = parseInt(s.slice(4, 6), 16);
+        return [r, g, b];
+    }
+    if (str.startsWith('rgb')) {
+        const m = str.match(/rgb\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)/i);
+        if (m) return [parseInt(m[1], 10), parseInt(m[2], 10), parseInt(m[3], 10)];
+    }
+    return null;
+}
+
+function rgbToHex(rgb) {
+    if (!rgb || !Array.isArray(rgb)) return '#ff0000';
+    const [r,g,b] = rgb;
+    return '#' + [r,g,b].map(v => {
+        const s = Math.max(0, Math.min(255, Math.round(v))).toString(16);
+        return s.length === 1 ? '0' + s : s;
+    }).join('');
+}
+
+function populateLabelColorUI() {
+    const container = document.getElementById('label-colors');
+    if (!container) return;
+    container.innerHTML = '';
+
+    // Determine labels: from mask if available, otherwise from state.labelMap
+    const labels = new Set();
+    if (state.mask && state.mask.data) {
+        const vals = state.mask.data;
+        for (let i=0;i<vals.length;i++) {
+            const v = Math.round(vals[i]);
+            if (v>0) labels.add(v);
+            if (labels.size >= 200) break;
+        }
+    }
+    // Include any labels from labelMap
+    if (state.labelMap) {
+        for (const k of Object.keys(state.labelMap)) labels.add(Number(k));
+    }
+
+    if (labels.size === 0) {
+        container.innerHTML = '<div class="text-neutral-500 text-xs">No labels available. Load a mask or label config.</div>';
+        return;
+    }
+
+    const labelList = Array.from(labels).sort((a,b)=>a-b);
+    labelList.forEach(lab => {
+        const row = document.createElement('div');
+        row.className = 'flex items-center gap-2';
+
+        const lbl = document.createElement('div');
+        lbl.className = 'w-8 text-xs font-mono text-neutral-300';
+        lbl.textContent = lab;
+
+        const nameInput = document.createElement('input');
+        nameInput.type = 'text';
+        nameInput.className = 'flex-1 bg-neutral-800 border border-neutral-700 rounded p-1 text-white text-xs';
+        const mapVal = state.labelMap && state.labelMap[lab];
+        let name = '';
+        let color = null;
+        if (mapVal) {
+            if (typeof mapVal === 'string') name = mapVal;
+            else if (typeof mapVal === 'object') { name = mapVal.name || ''; color = mapVal.color || null; }
+        }
+        if (!name) name = 'Label_' + lab;
+        nameInput.value = name;
+
+        const colorInput = document.createElement('input');
+        colorInput.type = 'color';
+        colorInput.className = 'w-10 h-8 p-0 border-0';
+        if (!color) {
+            const def = getMaskColor(lab) || [255,0,0];
+            colorInput.value = rgbToHex(def);
+        } else {
+            colorInput.value = parseHexColor(color) ? (color.startsWith('#') ? color : rgbToHex(parseHexColor(color))) : '#ff0000';
+        }
+
+        // handlers
+        colorInput.addEventListener('input', (e) => {
+            const c = e.target.value;
+            state.labelMap = state.labelMap || {};
+            const existing = state.labelMap[lab];
+            if (existing && typeof existing === 'object') existing.color = c, existing.name = existing.name || nameInput.value;
+            else state.labelMap[lab] = { name: nameInput.value, color: c };
+            renderAll();
+            updateVTKVolume();
+            try { render3D(); } catch(e){}
+        });
+
+        nameInput.addEventListener('change', (e) => {
+            const nm = e.target.value || ('Label_'+lab);
+            state.labelMap = state.labelMap || {};
+            const existing = state.labelMap[lab];
+            if (existing && typeof existing === 'object') existing.name = nm;
+            else state.labelMap[lab] = { name: nm, color: colorInput.value };
+            renderAll();
+            updateVTKVolume();
+        });
+
+        row.appendChild(lbl);
+        row.appendChild(nameInput);
+        row.appendChild(colorInput);
+        container.appendChild(row);
+    });
+
+    // Wire reset/refresh buttons
+    const btnReset = document.getElementById('btn-reset-label-colors');
+    if (btnReset) btnReset.onclick = () => {
+        for (const lab of labelList) {
+            state.labelMap[lab] = { name: state.labelMap && state.labelMap[lab] && state.labelMap[lab].name ? state.labelMap[lab].name : ('Label_'+lab), color: rgbToHex(getMaskColor(lab) || [255,0,0]) };
+        }
+        populateLabelColorUI();
+        renderAll(); updateVTKVolume(); try{ render3D(); }catch(e){}
+    };
+    const btnRefresh = document.getElementById('btn-refresh-label-colors');
+    if (btnRefresh) btnRefresh.onclick = () => { populateLabelColorUI(); };
+}
+
 // Reusable Temp Canvas for Offscreen Rendering
 const tempCanvas = document.createElement('canvas');
 const tempCtx = tempCanvas.getContext('2d');
@@ -708,7 +875,7 @@ function drawViewport(axis) {
             // Mask Overlay
             if (showMask) {
                 const mVal = state.mask.data[idx];
-                const mColor = getMaskColor(mVal);
+                const mColor = getLabelRgb(mVal);
                 if (mColor) {
                     r = r * (1 - maskOp) + mColor[0] * maskOp;
                     g = g * (1 - maskOp) + mColor[1] * maskOp;
@@ -769,91 +936,348 @@ function drawViewport(axis) {
     container.querySelector('.overlay-text').textContent = `${axis.toUpperCase()} [${sliceIdx}]`;
 }
 
+// Enhanced 3D render: devicePixelRatio-aware, animation loop, smoother points and depth-based shading
+let _3d_animHandle = null;
+state.ui._3dRotateVel = { x: 0, y: 0 };
 function render3D() {
-    if (!state.volume) return;
+    // Render only when a mask is present (3D view shows mask-only)
+    if (!state.mask || !state.settings.showMask) {
+        // show placeholder asking user to load mask
+        els.labels.text3d.classList.remove('hidden');
+        // dispose vtk instance if any
+        if (state.ui && state.ui.vtk) disposeVTK3D();
+        return;
+    }
+    // If vtk.js is available, prefer high-fidelity volume rendering via vtk
+    if (typeof vtk !== 'undefined') {
+        try {
+            if (!state.ui.vtk || !state.ui.vtk.initialized) initVTK3D(els.viewports.v3d.parentElement);
+            updateVTKVolume();
+            return;
+        } catch (err) {
+            console.warn('vtk.js render failed, falling back to canvas renderer', err);
+        }
+    }
     const canvas = els.viewports.v3d;
     const ctx = canvas.getContext('2d');
-    
+
     const rect = canvas.parentElement.getBoundingClientRect();
-    canvas.width = rect.width;
-    canvas.height = rect.height;
+    const dpr = window.devicePixelRatio || 1;
+    // Set CSS size and backing store size for crisp rendering
+    canvas.style.width = rect.width + 'px';
+    canvas.style.height = rect.height + 'px';
+    canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+    canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0,0,canvas.width, canvas.height);
-    
+    // Background gradient
+    const g = ctx.createLinearGradient(0, 0, 0, rect.height);
+    g.addColorStop(0, '#04060a');
+    g.addColorStop(1, '#000000');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, rect.width, rect.height);
+
     const d = state.volume.dims;
-    const cx = canvas.width/2;
-    const cy = canvas.height/2;
-    // slightly smaller scale to fit rotation
-    const scale = Math.min(canvas.width, canvas.height) / Math.max(d.x, d.y, d.z) * 0.5;
-    
-    const angleX = state.ui.rotate3D.x + Math.PI/4;
-    const angleY = state.ui.rotate3D.y + Math.PI/4;
-    
-    // Project Helper
-    const project = (x, y, z) => {
-        // Center bbox
-        let dx = x - d.x/2;
-        let dy = y - d.y/2;
-        let dz = z - d.z/2;
-        
-        // Rotate Y
-        let x1 = dx * Math.cos(angleY) - dz * Math.sin(angleY);
-        let z1 = dx * Math.sin(angleY) + dz * Math.cos(angleY);
-        
-        // Rotate X
-        let y2 = dy * Math.cos(angleX) - z1 * Math.sin(angleX);
-        
-        return [cx + x1 * scale, cy + y2 * scale];
-    };
-    
-    // Draw Bounding Box
-    ctx.strokeStyle = '#0ea5e9';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    const corners = [
-        [0,0,0], [d.x,0,0], [d.x,d.y,0], [0,d.y,0],
-        [0,0,d.z], [d.x,0,d.z], [d.x,d.y,d.z], [0,d.y,d.z]
-    ];
-    const pts = corners.map(p => project(p[0], p[1], p[2]));
-    const edges = [
-        [0,1], [1,2], [2,3], [3,0], // Front
-        [4,5], [5,6], [6,7], [7,4], // Back
-        [0,4], [1,5], [2,6], [3,7]  // Sides
-    ];
-    edges.forEach(e => {
-        ctx.moveTo(pts[e[0]][0], pts[e[0]][1]);
-        ctx.lineTo(pts[e[1]][0], pts[e[1]][1]);
-    });
-    ctx.stroke();
+    const cx = rect.width / 2;
+    const cy = rect.height / 2;
+    const scale = Math.min(rect.width, rect.height) / Math.max(d.x, d.y, d.z) * 0.6;
 
-    // Draw Real Mask Data (Point Cloud)
+    // Smooth rotate state with small offset for nicer initial view
+    const angleX = state.ui.rotate3D.x + Math.PI / 6;
+    const angleY = state.ui.rotate3D.y + Math.PI / 6;
+
+    // Projection helper returns [x,y,depth]
+    const project = (x, y, z) => {
+        let dx = x - d.x / 2;
+        let dy = y - d.y / 2;
+        let dz = z - d.z / 2;
+
+        // Rotate Y
+        const x1 = dx * Math.cos(angleY) - dz * Math.sin(angleY);
+        const z1 = dx * Math.sin(angleY) + dz * Math.cos(angleY);
+
+        // Rotate X
+        const y2 = dy * Math.cos(angleX) - z1 * Math.sin(angleX);
+
+        // depth used for simple painter's sorting / shading
+        const depth = (z1 + d.z / 2) / d.z;
+        return [cx + x1 * scale, cy + y2 * scale, depth];
+    };
+
+    // (Intentionally not drawing any bounding box or overlays)
+
+    // Draw point cloud (mask) with depth-sorted rendering for better occlusion
     if (state.mask && state.settings.showMask) {
-        ctx.fillStyle = '#FF0000'; // Default mask color
-        
-        // Performance optimization: Stride
-        // Render max ~5000 points to keep FPS sane in JS
         const totalVoxels = d.x * d.y * d.z;
-        const stride = Math.max(1, Math.floor(Math.pow(totalVoxels / 5000, 1/3)));
-        
-        for(let z=0; z<d.z; z+=stride) {
-            for(let y=0; y<d.y; y+=stride) {
-                for(let x=0; x<d.x; x+=stride) {
-                    const idx = x + y*d.x + z*d.x*d.y;
-                    const mVal = state.mask.data[idx];
-                    
-                    if(mVal > 0) {
-                        const mColor = getMaskColor(mVal);
-                        if(mColor) {
-                            ctx.fillStyle = `rgb(${mColor[0]},${mColor[1]},${mColor[2]})`;
-                            const p = project(x,y,z);
-                            ctx.fillRect(p[0], p[1], 2, 2);
-                        }
+        // targetPoints based on quality slider (1..100)
+        const q = (state.settings && state.settings.renderQuality) ? state.settings.renderQuality : 70;
+        const targetPoints = Math.max(500, Math.round(2000 + (q / 100) * 20000));
+        const stride = Math.max(1, Math.floor(Math.pow(totalVoxels / targetPoints, 1/3)));
+
+        const points = [];
+        for (let z = 0; z < d.z; z += stride) {
+            for (let y = 0; y < d.y; y += stride) {
+                for (let x = 0; x < d.x; x += stride) {
+                    const idx = x + y * d.x + z * d.x * d.y;
+                    const mv = state.mask.data[idx];
+                    if (mv > 0) {
+                        const p = project(x, y, z);
+                        const col = getLabelRgb(mv) || [255, 100, 100];
+                        points.push({ x: p[0], y: p[1], depth: p[2], color: col });
                     }
                 }
             }
         }
+
+        // Painter's sort back -> front
+        points.sort((a, b) => a.depth - b.depth);
+
+        // Smoother rendering: enable image smoothing and a subtle shadow to anti-alias points
+        ctx.imageSmoothingEnabled = true;
+        ctx.globalCompositeOperation = 'lighter';
+        for (let i = 0; i < points.length; i++) {
+            const p = points[i];
+            // size and alpha based on depth (closer => larger/brighter)
+            const size = Math.max(1, (1.6 - p.depth) * 2.5);
+            const alpha = Math.max(0.08, 1.0 - p.depth);
+            // soft shadow to smooth edges
+            ctx.shadowBlur = Math.min(6, size * 1.5);
+            ctx.shadowColor = `rgba(${p.color[0]},${p.color[1]},${p.color[2]},${Math.min(0.6, alpha)})`;
+            ctx.fillStyle = `rgba(${p.color[0]},${p.color[1]},${p.color[2]},${alpha})`;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        // reset shadow and composite mode
+        ctx.shadowBlur = 0;
+        ctx.globalCompositeOperation = 'source-over';
     }
+
+    // (No focal highlight — show only mask points)
+
+    // hide placeholder
+    els.labels.text3d.classList.add('hidden');
+}
+
+// Animation loop for smooth rotation + inertia
+function _3dStartLoop() {
+    if (_3d_animHandle) return;
+    const loop = () => {
+        // apply velocity (inertia)
+        state.ui.rotate3D.x += state.ui._3dRotateVel.x;
+        state.ui.rotate3D.y += state.ui._3dRotateVel.y;
+
+        // friction
+        state.ui._3dRotateVel.x *= 0.92;
+        state.ui._3dRotateVel.y *= 0.92;
+
+        // small threshold to stop
+        if (Math.abs(state.ui._3dRotateVel.x) < 0.0005) state.ui._3dRotateVel.x = 0;
+        if (Math.abs(state.ui._3dRotateVel.y) < 0.0005) state.ui._3dRotateVel.y = 0;
+
+        render3D();
+        _3d_animHandle = requestAnimationFrame(loop);
+    };
+    _3d_animHandle = requestAnimationFrame(loop);
+}
+
+function _3dStopLoop() {
+    if (_3d_animHandle) cancelAnimationFrame(_3d_animHandle);
+    _3d_animHandle = null;
+}
+
+// --- vtk.js Volume Rendering Integration ---
+function initVTK3D(container) {
+    if (typeof vtk === 'undefined') return;
+    if (!container) container = document.body;
+
+    const fullScreenRenderer = vtk.Rendering.Misc.vtkFullScreenRenderWindow.newInstance({ rootContainer: container, containerStyle: { height: '100%', width: '100%' } });
+    const renderer = fullScreenRenderer.getRenderer();
+    const renderWindow = fullScreenRenderer.getRenderWindow();
+
+    // Create volume pipeline
+    const volume = vtk.Rendering.Core.vtkVolume.newInstance();
+    const mapper = vtk.Rendering.Core.vtkVolumeMapper.newInstance();
+    // Use a slightly smaller sample distance for smoother result (costlier but nicer)
+    mapper.setSampleDistance(0.6);
+    volume.setMapper(mapper);
+
+    // Transfer functions
+    const ctfun = vtk.Rendering.Core.vtkColorTransferFunction.newInstance();
+    const ofun = vtk.Common.DataModel.vtkPiecewiseFunction.newInstance();
+
+    volume.getProperty().setRGBTransferFunction(0, ctfun);
+    volume.getProperty().setScalarOpacity(0, ofun);
+    volume.getProperty().setScalarOpacityUnitDistance(0, 2.0);
+    volume.getProperty().setInterpolationTypeToLinear();
+    // Enable shading to improve visual smoothness and depth
+    try {
+        volume.getProperty().setShade(true);
+        volume.getProperty().setAmbient(0.15);
+        volume.getProperty().setDiffuse(0.85);
+        volume.getProperty().setSpecular(0.25);
+        volume.getProperty().setSpecularPower(12.0);
+    } catch (e) {}
+
+    renderer.addVolume(volume);
+    renderer.setBackground(0.02, 0.03, 0.04);
+
+    state.ui.vtk = { fullScreenRenderer, renderer, renderWindow, mapper, volume, ctfun, ofun, initialized: true };
+    // mark that camera should be reset after first volume upload
+    state.ui.vtk._needsCameraReset = true;
+    // Ensure the VTK canvas sits in our viewport container
+    // vtkFullScreenRenderWindow creates its own root; move its container into ours
+    // Move vtk's generated container inside our viewport container (ensure proper stacking and pointer handling)
+    try {
+        const fsContainer = fullScreenRenderer.getContainer ? fullScreenRenderer.getContainer() : null;
+        if (fsContainer) {
+            if (fsContainer.parentNode !== container) {
+                // remove from previous parent if needed
+                try { fsContainer.parentNode && fsContainer.parentNode.removeChild(fsContainer); } catch (e) {}
+                container.appendChild(fsContainer);
+            }
+            fsContainer.style.position = 'absolute';
+            fsContainer.style.inset = '0';
+            fsContainer.style.width = '100%';
+            fsContainer.style.height = '100%';
+            fsContainer.style.pointerEvents = 'auto';
+            fsContainer.style.zIndex = '0';
+        }
+    } catch (e) {
+        console.warn('Could not reparent vtk container', e);
+    }
+
+    // Hide the 3D placeholder text when vtk is initialized
+    try { els.labels.text3d.classList.add('hidden'); } catch (e) {}
+
+    // Ensure container allows pointer events and position context
+    try { if (!container.style.position) container.style.position = 'relative'; } catch (e) {}
+
+    // Setup interactor style so user can rotate/zoom/pan and bind it to the vtk container explicitly
+    try {
+        const interactor = fullScreenRenderer.getInteractor && fullScreenRenderer.getInteractor();
+        const fsContainer = fullScreenRenderer.getContainer && fullScreenRenderer.getContainer();
+        if (interactor) {
+            if (vtk.Interaction && vtk.Interaction.Style && vtk.Interaction.Style.vtkInteractorStyleTrackballCamera) {
+                const style = vtk.Interaction.Style.vtkInteractorStyleTrackballCamera.newInstance();
+                interactor.setInteractorStyle && interactor.setInteractorStyle(style);
+            }
+            interactor.initialize && interactor.initialize();
+            try {
+                // bind events to the container we appended to the viewport
+                if (interactor.bindEvents && fsContainer) interactor.bindEvents(fsContainer);
+            } catch (e) {
+                console.warn('Failed to bind vtk interactor events', e);
+            }
+        }
+    } catch (e) {
+        console.warn('Failed to configure vtk interactor', e);
+    }
+
+    // Responsive
+    window.addEventListener('resize', () => {
+        if (state.ui.vtk && state.ui.vtk.renderWindow) state.ui.vtk.renderWindow.render();
+    });
+}
+
+function updateVTKVolume() {
+    if (!state.ui.vtk || !state.ui.vtk.initialized) return;
+    const { mapper, renderer, renderWindow, volume, ctfun, ofun } = state.ui.vtk;
+    // Prefer rendering the mask only
+    if (!state.mask) {
+        // nothing to render
+        renderer.render();
+        return;
+    }
+
+    const d = state.mask.dims;
+
+    // Create vtkImageData from mask data
+    const imageData = vtk.Common.DataModel.vtkImageData.newInstance();
+    imageData.setOrigin(0, 0, 0);
+    const sp = state.mask.voxelDims || state.volume.voxelDims || { x: 1, y: 1, z: 1 };
+    imageData.setSpacing(sp.x || 1.0, sp.y || 1.0, sp.z || 1.0);
+    imageData.setDimensions(d.x, d.y, d.z);
+
+    // Ensure typed array
+    let values = state.mask.data;
+    if (!(values instanceof Float32Array)) values = new Float32Array(values);
+
+    const dataArray = vtk.Common.Core.vtkDataArray.newInstance({ numberOfComponents: 1, values, dataType: 'Float32' });
+    imageData.getPointData().setScalars(dataArray);
+
+    mapper.setInputData(imageData);
+
+    // Build discrete transfer functions for labels present in mask
+    ctfun.removeAllPoints();
+    ofun.removeAllPoints();
+
+    // Transparent for zero
+    ctfun.addRGBPoint(0, 0.0, 0.0, 0.0);
+    ofun.addPoint(0, 0.0);
+
+    // Collect unique labels (bounded to avoid huge scans)
+    const vals = values;
+    const labels = new Set();
+    const limit = 200; // max unique labels to index
+    for (let i = 0; i < vals.length; i++) {
+        const v = Math.round(vals[i]);
+        if (v > 0) labels.add(v);
+        if (labels.size >= limit) break;
+    }
+
+    // If user provided labelMap, prefer that order
+    const labelList = Object.keys(state.labelMap || {}).length > 0 ? Object.keys(state.labelMap).map(k => parseInt(k,10)) : Array.from(labels);
+    if (labelList.length === 0) {
+        // fallback: use a small palette for label 1
+        labelList.push(1);
+    }
+
+    for (let i = 0; i < labelList.length; i++) {
+        const lab = labelList[i];
+        let color = null;
+        if (state.labelMap && state.labelMap[lab]) {
+            const entry = state.labelMap[lab];
+            if (typeof entry === 'string') {
+                // legacy name-only entry; no color
+            } else if (typeof entry === 'object' && entry !== null) {
+                if (entry.color) color = parseHexColor(entry.color) || null;
+            }
+        }
+        // Fallback to default palette
+        if (!color) color = getMaskColor(lab) || [255, 0, 0];
+
+        const r = (color[0] || 255) / 255.0;
+        const gcol = (color[1] || 0) / 255.0;
+        const b = (color[2] || 0) / 255.0;
+        ctfun.addRGBPoint(lab, r, gcol, b);
+        ofun.addPoint(lab, state.settings.maskOpacity || 0.5);
+    }
+
+    // Hide placeholder (we have mask data to show)
+    try { els.labels.text3d.classList.add('hidden'); } catch (e) {}
+
+    // Update mapper and render
+    // Map renderQuality (1..100) to sampleDistance (higher quality -> smaller sample distance)
+    const q = (state.settings && state.settings.renderQuality) ? state.settings.renderQuality : 70;
+    const sd_min = 0.25; // highest quality
+    const sd_max = 1.2;  // lowest quality
+    const sd = sd_max - (q / 100) * (sd_max - sd_min);
+    try { mapper.setSampleDistance(sd); } catch (e) {}
+    if (state.ui.vtk._needsCameraReset) {
+        renderer.resetCamera();
+        state.ui.vtk._needsCameraReset = false;
+    }
+    renderWindow.render();
+}
+
+function disposeVTK3D() {
+    if (!state.ui.vtk) return;
+    try {
+        state.ui.vtk.renderWindow.getInteractor().unbindEvents();
+    } catch (e) {}
+    try { state.ui.vtk.fullScreenRenderer.delete(); } catch (e) {}
+    state.ui.vtk = null;
 }
 
 function renderAll() {
@@ -955,6 +1379,22 @@ els.inputs.maskOpacity.addEventListener('input', (e) => {
     els.labels.maskOpacity.textContent = e.target.value;
     renderAll();
 });
+
+// Render quality slider: map 1..100 to visual/perf tradeoff
+const renderQualityEl = document.getElementById('input-render-quality');
+const renderQualityVal = document.getElementById('val-render-quality');
+if (renderQualityEl) {
+    renderQualityEl.value = String(state.settings.renderQuality || 70);
+    if (renderQualityVal) renderQualityVal.textContent = String(renderQualityEl.value);
+    renderQualityEl.addEventListener('input', (e) => {
+        const q = Number(e.target.value);
+        state.settings.renderQuality = q;
+        if (renderQualityVal) renderQualityVal.textContent = String(q);
+        // update renderers
+        try { updateVTKVolume(); } catch (err) {}
+        try { render3D(); } catch (err) {}
+    });
+}
 
 // Options
 els.inputs.crosshair.addEventListener('change', (e) => {
@@ -1090,28 +1530,53 @@ els.inputs.btnReset.addEventListener('click', () => {
     }, { passive: false });
 });
 
-// 3D Rotation
+// 3D Rotation (pointer events + inertia)
 const v3d = els.viewports.v3d;
-v3d.parentElement.addEventListener('mousedown', (e) => {
+const _v3dContainer = v3d.parentElement;
+_v3dContainer.addEventListener('pointerdown', (e) => {
+    // If vtk is active, let vtk's interactor handle pointer events
+    if (state.ui && state.ui.vtk && state.ui.vtk.initialized) return;
+    if (!state.volume) return;
     e.preventDefault();
+    _v3dContainer.setPointerCapture(e.pointerId);
     let lastX = e.clientX;
     let lastY = e.clientY;
-    
-    const onMove = (mv) => {
-        const deltaX = mv.clientX - lastX;
-        const deltaY = mv.clientY - lastY;
-        state.ui.rotate3D.x += deltaY * 0.01;
-        state.ui.rotate3D.y += deltaX * 0.01;
+    // initialize small velocity
+    state.ui._3dRotateVel.x = 0;
+    state.ui._3dRotateVel.y = 0;
+    _3dStartLoop();
+
+    const onPointerMove = (mv) => {
+        const dx = mv.clientX - lastX;
+        const dy = mv.clientY - lastY;
+        // immediate rotation
+        state.ui.rotate3D.x += dy * 0.01;
+        state.ui.rotate3D.y += dx * 0.01;
+        // feed velocity for inertia
+        state.ui._3dRotateVel.x = dy * 0.002;
+        state.ui._3dRotateVel.y = dx * 0.002;
         lastX = mv.clientX;
         lastY = mv.clientY;
-        render3D();
     };
-    const onUp = () => {
-        window.removeEventListener('mousemove', onMove);
-        window.removeEventListener('mouseup', onUp);
+
+    const onUp = (up) => {
+        try { _v3dContainer.releasePointerCapture(e.pointerId); } catch (err) {}
+        _v3dContainer.removeEventListener('pointermove', onPointerMove);
+        _v3dContainer.removeEventListener('pointerup', onUp);
+        _v3dContainer.removeEventListener('pointercancel', onUp);
+        // let inertia continue; loop will stop when velocity decays
     };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
+
+    _v3dContainer.addEventListener('pointermove', onPointerMove);
+    _v3dContainer.addEventListener('pointerup', onUp);
+    _v3dContainer.addEventListener('pointercancel', onUp);
+});
+
+// Double-click to reset 3D rotation
+_v3dContainer.addEventListener('dblclick', () => {
+    state.ui.rotate3D = { x: 0, y: 0 };
+    state.ui._3dRotateVel = { x: 0, y: 0 };
+    render3D();
 });
 
 // Keyboard
