@@ -210,6 +210,72 @@
                     </div>
                 </div>
 
+                <!-- Manual Tools -->
+                <div class="space-y-3">
+                    <h2 class="text-xs font-bold text-neutral-400 uppercase tracking-wider">Manual Tools</h2>
+                    <div class="flex items-center gap-2 bg-neutral-800 p-2 rounded">
+                        <label class="cursor-pointer text-xs text-neutral-300 flex items-center gap-1">
+                            <input type="radio" name="tool" value="nav" checked class="accent-sky-500">
+                            Nav
+                        </label>
+                        <label class="cursor-pointer text-xs text-neutral-300 flex items-center gap-1">
+                            <input type="radio" name="tool" value="brush" class="accent-emerald-500">
+                            Brush
+                        </label>
+                        <label class="cursor-pointer text-xs text-neutral-300 flex items-center gap-1">
+                            <input type="radio" name="tool" value="erase" class="accent-red-500">
+                            Eraser
+                        </label>
+                    </div>
+
+                    <div class="space-y-1">
+                        <div class="flex justify-between text-neutral-300">
+                            <label>Size (px)</label>
+                            <span id="val-brush-size" class="font-mono text-sky-400">5</span>
+                        </div>
+                        <input type="range" id="input-brush-size" min="1" max="50" value="5" class="w-full">
+                    </div>
+                </div>
+
+                <!-- Thresholding & Segmentation -->
+                <div class="space-y-3">
+                    <h2 class="text-xs font-bold text-neutral-400 uppercase tracking-wider">Thresholding & Seg</h2>
+
+                    <div class="space-y-2">
+                        <select id="select-seg-op"
+                            class="w-full bg-neutral-800 border border-neutral-700 text-white rounded p-2 outline-none focus:border-sky-500 text-xs">
+                            <option value="" disabled selected>Select Operation...</option>
+                            <optgroup label="Manual">
+                                <option value="binary">1. Binary Threshold (Manual)</option>
+                                <option value="binary_inv">2. Binary Inverted (Manual)</option>
+                                <option value="truncate">3. Truncate (Cap Values)</option>
+                                <option value="range_pass">4. Range Pass (Mid-tones)</option>
+                            </optgroup>
+                            <optgroup label="Automated (Global)">
+                                <option value="otsu">5. Otsu's Method (2 Classes)</option>
+                                <option value="li">6. Li's Method (2 Classes)</option>
+                                <option value="multi_otsu">7. Multi-Otsu (3 Classes)</option>
+                            </optgroup>
+                            <optgroup label="Automated (Local)">
+                                <option value="local_adaptive">8. Local Adaptive (Gaussian)</option>
+                            </optgroup>
+                        </select>
+
+                        <!-- Dynamic Params -->
+                        <div id="seg-params" class="hidden grid grid-cols-2 gap-2">
+                            <input id="input-seg-p1" type="number" placeholder="Thresh"
+                                class="bg-neutral-800 border border-neutral-700 text-white rounded p-1 text-xs w-full">
+                            <input id="input-seg-p2" type="number" placeholder="Max"
+                                class="bg-neutral-800 border border-neutral-700 text-white rounded p-1 text-xs w-full">
+                        </div>
+
+                        <button id="btn-run-seg"
+                            class="w-full py-2 px-3 rounded text-white font-medium bg-teal-700 hover:bg-teal-600 transition-colors border border-teal-800">
+                            Run Seg / Threshold
+                        </button>
+                    </div>
+                </div>
+
                 <!-- Mask Controls -->
                 <div id="group-mask" class="space-y-3 opacity-50 pointer-events-none transition-opacity">
                     <h2 class="text-xs font-bold text-neutral-400 uppercase tracking-wider flex justify-between">
@@ -459,7 +525,10 @@
                     axial: { zoom: 1, pan: { x: 0, y: 0 } },
                     sagittal: { zoom: 1, pan: { x: 0, y: 0 } },
                     coronal: { zoom: 1, pan: { x: 0, y: 0 } }
-                }
+                },
+                tool: 'nav', // 'nav', 'brush', 'erase'
+                brushSize: 5,
+                isPainting: false
             }
             ,
             labelMap: {} // mapping integer label -> name
@@ -792,6 +861,13 @@
             }
         };
 
+        // Extra refs for Seg
+        els.inputs.segOp = document.getElementById('select-seg-op');
+        els.inputs.segP1 = document.getElementById('input-seg-p1');
+        els.inputs.segP2 = document.getElementById('input-seg-p2');
+        els.inputs.btnRunSeg = document.getElementById('btn-run-seg');
+        els.inputs.segParams = document.getElementById('seg-params');
+
         /**
          * FILE I/O
          */
@@ -1012,6 +1088,253 @@
         /**
          * RENDERING
          */
+        /**
+         * SEGMENTATION & THRESHOLDING
+         */
+        class SegmentationProcessor {
+
+            static applyBinary(volume, threshold) {
+                // Creates a binary mask where Vol >= Threshold
+                const { dims, data } = volume;
+                const size = dims.x * dims.y * dims.z;
+                const maskData = new Float32Array(size);
+
+                for (let i = 0; i < size; i++) {
+                    maskData[i] = (data[i] >= threshold) ? 1 : 0;
+                }
+                return { dims, data: maskData }; // Mask object
+            }
+
+            static applyBinaryInverted(volume, threshold) {
+                const { dims, data } = volume;
+                const size = dims.x * dims.y * dims.z;
+                const maskData = new Float32Array(size);
+                for (let i = 0; i < size; i++) {
+                    maskData[i] = (data[i] < threshold) ? 1 : 0;
+                }
+                return { dims, data: maskData };
+            }
+
+            static applyTruncate(volume, ceil) {
+                // Modifies VOLUME, not Mask. Caps values > ceil to ceil.
+                // Useful for removing high-intensity artifacts (metal, skull)
+                const { dims, data } = volume;
+                const newVol = ImageProcessor.cloneVolume(volume);
+                const nd = newVol.data;
+                for (let i = 0; i < nd.length; i++) {
+                    if (nd[i] > ceil) nd[i] = ceil;
+                }
+                return newVol;
+            }
+
+            static applyRangePass(volume, minV, maxV) {
+                const { dims, data } = volume;
+                const size = dims.x * dims.y * dims.z;
+                const maskData = new Float32Array(size);
+                for (let i = 0; i < size; i++) {
+                    maskData[i] = (data[i] >= minV && data[i] <= maxV) ? 1 : 0;
+                }
+                return { dims, data: maskData };
+            }
+
+            // --- Automated ---
+
+            static getHistogram(volume, bins = 1024) {
+                const data = volume.data;
+                let min = Infinity, max = -Infinity;
+                for (let i = 0; i < data.length; i += 10) { // Subsample for speed
+                    if (data[i] < min) min = data[i];
+                    if (data[i] > max) max = data[i];
+                }
+                const range = max - min;
+                const hist = new Float32Array(bins);
+
+                for (let i = 0; i < data.length; i++) {
+                    const idx = Math.floor(((data[i] - min) / (range + 0.0001)) * (bins - 1));
+                    hist[idx]++;
+                }
+                return { hist, min, max, binSize: range / bins };
+            }
+
+            static computeOtsu(volume) {
+                const { hist, min, binSize } = this.getHistogram(volume, 256);
+                const total = volume.data.length;
+
+                let sum = 0;
+                for (let t = 0; t < 256; t++) sum += t * hist[t];
+
+                let sumB = 0;
+                let wB = 0;
+                let wF = 0;
+
+                let maxVar = 0;
+                let thresholdIdx = 0;
+
+                for (let t = 0; t < 256; t++) {
+                    wB += hist[t];
+                    if (wB === 0) continue;
+
+                    wF = total - wB;
+                    if (wF === 0) break;
+
+                    sumB += t * hist[t];
+
+                    const mB = sumB / wB;
+                    const mF = (sum - sumB) / wF;
+
+                    // Inter-class variance
+                    const varBetween = wB * wF * (mB - mF) * (mB - mF);
+
+                    if (varBetween > maxVar) {
+                        maxVar = varBetween;
+                        thresholdIdx = t;
+                    }
+                }
+                return min + thresholdIdx * binSize;
+            }
+
+            static computeLi(volume) {
+                // Li's Minimum Cross Entropy (Iterative)
+                // 1. Calculate Mean
+                const { hist, min, binSize } = this.getHistogram(volume, 256);
+                let total = 0, sum = 0;
+                for (let i = 0; i < 256; i++) { total += hist[i]; sum += i * hist[i]; }
+                if (total === 0) return min;
+
+                let mean = sum / total;
+                let t_next = mean;
+                let t_prev = min;
+                const tolerance = 0.5;
+
+                // Iteratively refine
+                for (let iter = 0; iter < 100; iter++) {
+                    t_prev = t_next;
+
+                    // Mean of background (<= t) and foreground (> t)
+                    let sumB = 0, wB = 0, sumF = 0, wF = 0;
+                    // Map threshold to index
+                    const tIdx = Math.floor((t_prev));
+
+                    for (let i = 0; i < 256; i++) {
+                        if (i <= tIdx) { wB += hist[i]; sumB += i * hist[i]; }
+                        else { wF += hist[i]; sumF += i * hist[i]; }
+                    }
+
+                    const mB = wB > 0 ? sumB / wB : 0;
+                    const mF = wF > 0 ? sumF / wF : 0;
+
+                    // Li's formula for next threshold: (mB - mF) / (log(mB) - log(mF))  ... derivation varies
+                    // Simpler version: T = (mean_back + mean_fore)/2? No that's IsoData.
+                    // Li optimizes J = -Sum( p * log(p) )
+                    // Approximation: new_T = (mF - mB) / (Math.log(mF) - Math.log(mB))
+                    if (mF <= 0 || mB <= 0 || mF === mB) break;
+
+                    const nextVal = (mF - mB) / (Math.log(mF) - Math.log(mB));
+                    // Check bounds
+                    if (!isFinite(nextVal)) break;
+                    t_next = nextVal;
+
+                    if (Math.abs(t_next - t_prev) < tolerance) break;
+                }
+
+                return min + t_next * binSize;
+            }
+
+            static computeMultiOtsu(volume) {
+                // Simplified Multi-Otsu for 3 classes (2 thresholds)
+                // Exhaustive search is O(L^2), acceptable for L=64 or 128 bins.
+                const L = 64;
+                const { hist, min, binSize } = this.getHistogram(volume, L);
+                const total = volume.data.length;
+
+                // Precompute probabilities and means
+                // P(i) and S(i)
+                const P = new Float32Array(L + 1);
+                const S = new Float32Array(L + 1);
+                P[0] = 0; S[0] = 0;
+                for (let i = 1; i <= L; i++) {
+                    P[i] = P[i - 1] + hist[i - 1];
+                    S[i] = S[i - 1] + (i - 1) * hist[i - 1];
+                }
+                const globalMean = S[L] / total;
+
+                let maxSig = 0;
+                let t1_best = 0;
+                let t2_best = 0;
+
+                // Iterate t1 from 0 to L-2
+                // Iterate t2 from t1+1 to L-1
+                for (let t1 = 0; t1 < L - 2; t1++) {
+                    const w0 = P[t1 + 1];
+                    if (w0 === 0) continue;
+                    const u0 = S[t1 + 1] / w0;
+
+                    for (let t2 = t1 + 1; t2 < L - 1; t2++) {
+                        const w1 = P[t2 + 1] - P[t1 + 1];
+                        if (w1 === 0) continue;
+                        const w2 = total - P[t2 + 1];
+                        if (w2 === 0) continue;
+
+                        const u1 = (S[t2 + 1] - S[t1 + 1]) / w1;
+                        const u2 = (S[L] - S[t2 + 1]) / w2;
+
+                        // Sigma_B^2 = w0*(u0-uT)^2 + w1*(u1-uT)^2 + w2*(u2-uT)^2
+                        const sig = w0 * (u0 - globalMean) * (u0 - globalMean) +
+                            w1 * (u1 - globalMean) * (u1 - globalMean) +
+                            w2 * (u2 - globalMean) * (u2 - globalMean);
+
+                        if (sig > maxSig) {
+                            maxSig = sig;
+                            t1_best = t1;
+                            t2_best = t2;
+                        }
+                    }
+                }
+
+                // Return mask with 0, 1, 2
+                const thresh1 = min + t1_best * binSize;
+                const thresh2 = min + t2_best * binSize;
+
+                // Generate Label Map
+                const { data, dims } = volume;
+                const mask = new Float32Array(data.length);
+                for (let i = 0; i < data.length; i++) {
+                    const v = data[i];
+                    if (v < thresh1) mask[i] = 1; // BG 1
+                    else if (v < thresh2) mask[i] = 2; // Tissue 1
+                    else mask[i] = 3; // Tissue 2
+                }
+                return { dims, data: mask };
+            }
+
+            static applyLocalAdaptive(volume) {
+                const { dims, data } = volume;
+                const w = dims.x, h = dims.y, d = dims.z;
+                const strideXY = w * h;
+                const out = new Float32Array(data.length);
+
+                // Use Integral Image (Summed Area Table) for fast box filter in 1 pass?
+                // Or simple Gaussian subtraction. 
+                // T = GaussianMean(I) - C
+                // Mask = I > T
+
+                // Reuse ImageProcessor.applyGaussian
+                // BUT applyGaussian modifies in place, so clone first
+                const blurred = ImageProcessor.cloneVolume(volume);
+                ImageProcessor.applyGaussian(blurred, 2.0); // sigma=2.0 -> block size ~ 13
+
+                const bData = blurred.data;
+                for (let i = 0; i < data.length; i++) {
+                    // Local threshold = LocalMean - Constant(10?)
+                    const thresh = bData[i] - 10;
+                    out[i] = (data[i] > thresh) ? 1 : 0;
+                }
+                return { dims, data: out };
+            }
+        }
+
+        ImageProcessor.applyBinaryInverted = SegmentationProcessor.applyBinaryInverted; // alias if needed or keep separate
+
         function applyWindowLevel(val, wWidth, wCenter, map, invert) {
             const lower = wCenter - wWidth / 2;
             const upper = wCenter + wWidth / 2;
@@ -1783,6 +2106,111 @@
             renderAll();
         });
 
+        // --- Tool Logic ---
+        document.querySelectorAll('input[name="tool"]').forEach(el => {
+            el.addEventListener('change', (e) => {
+                state.ui.tool = e.target.value;
+            });
+        });
+        document.getElementById('input-brush-size').addEventListener('input', (e) => {
+            state.ui.brushSize = Number(e.target.value);
+            document.getElementById('val-brush-size').textContent = e.target.value;
+        });
+
+        // --- Segmentation UI Wiring ---
+        els.inputs.segOp.addEventListener('change', (e) => {
+            const val = e.target.value;
+            const params = els.inputs.segParams;
+            const p1 = els.inputs.segP1;
+            const p2 = els.inputs.segP2;
+
+            // Default hidden
+            params.classList.add('hidden');
+
+            if (val === 'binary' || val === 'binary_inv') {
+                params.classList.remove('hidden');
+                params.classList.remove('grid-cols-2');
+                p1.placeholder = "Threshold (e.g. 500)";
+                p1.value = state.settings.windowCenter ? Math.round(state.settings.windowCenter) : 200;
+                p2.classList.add('hidden');
+            } else if (val === 'truncate') {
+                params.classList.remove('hidden');
+                params.classList.remove('grid-cols-2');
+                p1.placeholder = "Ceiling Value";
+                p2.classList.add('hidden');
+            } else if (val === 'range_pass') {
+                params.classList.remove('hidden');
+                params.classList.add('grid-cols-2');
+                p1.placeholder = "Min";
+                p2.classList.remove('hidden');
+                p2.placeholder = "Max";
+            }
+        });
+
+        els.inputs.btnRunSeg.addEventListener('click', () => {
+            const op = els.inputs.segOp.value;
+            if (!op || !state.volume) return alert('Load Volume and select Op');
+
+            els.labels.loading.textContent = "Segmenting...";
+            els.labels.loading.classList.remove('hidden');
+
+            setTimeout(() => {
+                try {
+                    let resMask = null;
+                    let resVol = null; // if modifying volume
+
+                    const p1 = Number(els.inputs.segP1.value);
+                    const p2 = Number(els.inputs.segP2.value);
+
+                    switch (op) {
+                        case 'binary': resMask = SegmentationProcessor.applyBinary(state.volume, p1); break;
+                        case 'binary_inv': resMask = SegmentationProcessor.applyBinaryInverted(state.volume, p1); break;
+                        case 'truncate': resVol = SegmentationProcessor.applyTruncate(state.volume, p1); break;
+                        case 'range_pass': resMask = SegmentationProcessor.applyRangePass(state.volume, p1, p2); break;
+                        case 'otsu': {
+                            const th = SegmentationProcessor.computeOtsu(state.volume);
+                            console.log("Otsu Threshold:", th);
+                            resMask = SegmentationProcessor.applyBinary(state.volume, th);
+                            alert(`Otsu Threshold: ${th.toFixed(1)}`);
+                            break;
+                        }
+                        case 'li': {
+                            const th = SegmentationProcessor.computeLi(state.volume);
+                            resMask = SegmentationProcessor.applyBinary(state.volume, th);
+                            alert(`Li Threshold: ${th.toFixed(1)}`);
+                            break;
+                        }
+                        case 'multi_otsu': resMask = SegmentationProcessor.computeMultiOtsu(state.volume); break;
+                        case 'local_adaptive': resMask = SegmentationProcessor.applyLocalAdaptive(state.volume); break;
+                    }
+
+                    if (resVol) {
+                        state.volume = resVol;
+                        renderAll();
+                        // Update 3D
+                        try { render3D(); } catch (e) { }
+                    }
+                    if (resMask) {
+                        state.mask = resMask;
+                        // Enable mask UI
+                        els.inputs.maskCheck.checked = true;
+                        state.settings.showMask = true;
+                        document.getElementById('group-mask').classList.remove('opacity-50', 'pointer-events-none');
+
+                        populateLabelColorUI();
+                        renderAll();
+                        updateVTKVolume();
+                        try { render3D(); } catch (e) { }
+                    }
+
+                } catch (err) {
+                    alert(err.message);
+                } finally {
+                    els.labels.loading.classList.add('hidden');
+                }
+            }, 50);
+        });
+
         // Image Processing Operations
         if (els.inputs.btnRunOp) {
             els.inputs.btnRunOp.addEventListener('click', () => {
@@ -1917,17 +2345,102 @@
                 const startX = e.clientX;
                 const startY = e.clientY;
                 const startPan = { ...state.ui.viewports[axis].pan };
+                const tool = state.ui.tool || 'nav';
+
+                // Helper to paint
+                const paintAt = (clientX, clientY) => {
+                    const canvas = container.querySelector('canvas');
+                    const rect = canvas.getBoundingClientRect();
+                    const vpState = state.ui.viewports[axis];
+                    const d = state.volume.dims;
+                    let w, h;
+                    if (axis === 'axial') { w = d.x; h = d.y; }
+                    else if (axis === 'sagittal') { w = d.y; h = d.z; }
+                    else { w = d.x; h = d.z; }
+
+                    const scaleX = canvas.width / w;
+                    const scaleY = canvas.height / h;
+                    const baseScale = Math.min(scaleX, scaleY);
+                    const totalScale = baseScale * vpState.zoom;
+                    const offsetX = (canvas.width - w * baseScale) / 2;
+                    const offsetY = (canvas.height - h * baseScale) / 2;
+
+                    const mouseX = clientX - rect.left;
+                    const mouseY = clientY - rect.top;
+                    const imgX = (mouseX - (offsetX + vpState.pan.x)) / totalScale;
+                    const imgY = (mouseY - (offsetY + vpState.pan.y)) / totalScale;
+
+                    const ix = Math.floor(imgX);
+                    const iy = Math.floor(imgY);
+
+                    if (ix >= 0 && ix < w && iy >= 0 && iy < h) {
+                        // Paint Circle
+                        const r = Number(state.ui.brushSize) || 5;
+                        const r2 = r * r;
+
+                        // Create mask if missing
+                        if (!state.mask) {
+                            const size = d.x * d.y * d.z;
+                            state.mask = { dims: d, data: new Float32Array(size) };
+                            state.settings.showMask = true;
+                            els.inputs.maskCheck.checked = true;
+                            document.getElementById('group-mask').classList.remove('opacity-50', 'pointer-events-none');
+                        }
+
+                        const strideXY = d.x * d.y;
+                        let zSlice = 0;
+                        if (axis === 'axial') zSlice = state.crosshair.z;
+                        else if (axis === 'sagittal') zSlice = state.crosshair.x;
+                        else zSlice = state.crosshair.y;
+
+                        const val = (tool === 'erase') ? 0 : 1; // Default label 1
+
+                        // Loop bounding box
+                        for (let dy = -r; dy <= r; dy++) {
+                            for (let dx = -r; dx <= r; dx++) {
+                                if (dx * dx + dy * dy <= r2) {
+                                    const px = ix + dx;
+                                    const py = iy + dy;
+                                    if (px >= 0 && px < w && py >= 0 && py < h) {
+                                        // Map 2D -> 3D index
+                                        let vx, vy, vz;
+                                        if (axis === 'axial') { vx = px; vy = py; vz = zSlice; }
+                                        else if (axis === 'sagittal') { vx = zSlice; vy = px; vz = py; }
+                                        else { vx = px; vy = zSlice; vz = py; }
+
+                                        if (vx >= 0 && vx < d.x && vy >= 0 && vy < d.y && vz >= 0 && vz < d.z) {
+                                            const idx = vx + vy * d.x + vz * strideXY;
+                                            state.mask.data[idx] = val;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        drawViewport(axis);
+                    }
+                };
 
                 // Mode detection
-                const isPan = e.button === 2 || (e.button === 0 && e.shiftKey); // Right click or Shift+Left
+                const isPan = e.button === 2 || (e.button === 0 && e.shiftKey);
+
+                if (tool !== 'nav' && !isPan) {
+                    // Start Painting
+                    state.ui.isPainting = true;
+                    paintAt(e.clientX, e.clientY);
+                }
 
                 const onMove = (mv) => {
+                    if (state.ui.isPainting) {
+                        paintAt(mv.clientX, mv.clientY);
+                        return;
+                    }
+
                     if (isPan) {
                         // PAN LOGIC
                         state.ui.viewports[axis].pan.x = startPan.x + (mv.clientX - startX);
                         state.ui.viewports[axis].pan.y = startPan.y + (mv.clientY - startY);
                         drawViewport(axis);
-                    } else {
+                    } else if (tool === 'nav') {
                         // CROSSHAIR LOGIC
                         const canvas = container.querySelector('canvas');
                         // We need to map mouse coordinates back to Image Space
@@ -1976,6 +2489,13 @@
                 };
 
                 const onUp = () => {
+                    if (state.ui.isPainting) {
+                        state.ui.isPainting = false;
+                        // Trigger mask refresh for labels and 3D
+                        populateLabelColorUI();
+                        updateVTKVolume();
+                        try { render3D(); } catch (e) { }
+                    }
                     window.removeEventListener('mousemove', onMove);
                     window.removeEventListener('mouseup', onUp);
                 };
