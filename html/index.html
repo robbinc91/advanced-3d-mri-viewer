@@ -4,8 +4,12 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>NeuroView Web Pro</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+    <script src="tailwindscss.js"></script>
+    <script src="pako.min.js"></script>
+    <!-- Optional libraries for advanced features -->
+    <script src="https://unpkg.com/nifti-reader-js/dist/nifti-reader.min.js"></script>
+    <script src="vtk.js"></script>
+    <script src="plotly.min.js"></script>
     <style>
         body {
             background-color: #000;
@@ -107,6 +111,14 @@
                 <!-- Hidden Inputs -->
                 <input type="file" id="input-file-mri" class="hidden" accept=".nii,.nii.gz,.img,.hdr">
                 <input type="file" id="input-file-mask" class="hidden" accept=".nii,.nii.gz,.img,.hdr">
+                <input type="file" id="input-file-label-config" class="hidden" accept=".json">
+
+                <div class="mt-2 grid grid-cols-2 gap-2">
+                    <button id="btn-load-label-config" class="py-2 px-3 rounded text-white font-medium bg-emerald-700 hover:bg-emerald-600 transition-colors">Load Label Config</button>
+                    <button id="btn-save-label-config" class="py-2 px-3 rounded text-white font-medium bg-amber-700 hover:bg-amber-600 transition-colors">Save Label Config</button>
+                </div>
+
+                <button id="btn-calc-volumes" class="w-full mt-2 py-2 px-3 rounded text-neutral-300 font-medium bg-neutral-800 hover:bg-neutral-700 transition-colors border border-neutral-700">Calculate Volumes</button>
 
                 <div id="loading-indicator" class="hidden text-xs text-center text-yellow-500 font-mono animate-pulse">
                     Processing Data...
@@ -271,13 +283,20 @@ class NiftiParser {
         const scl_slope = dataView.getFloat32(112, isLittleEndian);
         const scl_inter = dataView.getFloat32(116, isLittleEndian);
 
+        // Read pixdim (voxel spacing) at byte offset 76 (8 floats)
+        const pixdim = [];
+        for (let i = 0; i < 8; i++) {
+            pixdim.push(dataView.getFloat32(76 + i * 4, isLittleEndian));
+        }
+
         return {
             dims: { x: dims[1], y: dims[2], z: dims[3] || 1 },
             datatype,
             vox_offset,
             scl_slope: scl_slope === 0 ? 1 : scl_slope,
             scl_inter,
-            isLittleEndian
+            isLittleEndian,
+            voxelDims: { x: pixdim[1] || 1.0, y: pixdim[2] || 1.0, z: pixdim[3] || 1.0 }
         };
     }
 
@@ -341,6 +360,8 @@ const state = {
             coronal: { zoom: 1, pan: {x:0, y:0} }
         }
     }
+    ,
+    labelMap: {} // mapping integer label -> name
 };
 
 /**
@@ -364,6 +385,9 @@ const els = {
         btnLoadMask: document.getElementById('btn-load-mask'),
         fileMri: document.getElementById('input-file-mri'),
         fileMask: document.getElementById('input-file-mask'),
+        fileLabelConfig: document.getElementById('input-file-label-config'),
+        btnLoadLabelConfig: document.getElementById('btn-load-label-config'),
+        btnSaveLabelConfig: document.getElementById('btn-save-label-config'),
         btnReset: document.getElementById('btn-reset'),
         maskCheck: document.getElementById('check-mask'),
         maskOpacity: document.getElementById('input-mask-opacity')
@@ -397,7 +421,8 @@ async function loadFile(file) {
                 
                 const header = NiftiParser.parseHeader(buffer);
                 const result = NiftiParser.readData(header, buffer);
-                resolve({ ...result, dims: header.dims });
+                // Return data + dims + voxel dimensions + raw header for later use
+                resolve({ ...result, dims: header.dims, voxelDims: header.voxelDims, header });
             } catch (err) {
                 reject(err);
             }
@@ -467,6 +492,80 @@ async function handleMaskLoad(file) {
     } finally {
         els.labels.loading.classList.add('hidden');
     }
+}
+
+// --- Label Config (JSON) Load / Save ---
+async function handleLabelConfigLoad(file) {
+    try {
+        const text = await file.text();
+        const json = JSON.parse(text);
+        // Normalize keys to integers
+        const map = {};
+        for (const k of Object.keys(json)) {
+            const ik = parseInt(k, 10);
+            map[ik] = json[k];
+        }
+        state.labelMap = map;
+        alert('Label configuration loaded. ' + Object.keys(map).length + ' entries.');
+    } catch (err) {
+        alert('Failed to load label config: ' + err.message);
+    }
+}
+
+function handleLabelConfigSave() {
+    try {
+        const content = JSON.stringify(state.labelMap || {}, null, 2);
+        const blob = new Blob([content], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'label_config.json';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+    } catch (err) {
+        alert('Failed to save label config: ' + err.message);
+    }
+}
+
+function calculateVolumes() {
+    if (!state.mask || !state.volume) {
+        alert('Load both MRI and Mask first.');
+        return;
+    }
+
+    const counts = new Map();
+    const md = state.mask.dims;
+    const data = state.mask.data;
+    for (let i = 0; i < data.length; i++) {
+        const v = Math.round(data[i]);
+        if (v <= 0) continue;
+        counts.set(v, (counts.get(v) || 0) + 1);
+    }
+
+    const voxel = state.volume.voxelDims || { x:1, y:1, z:1 };
+    const voxel_mm3 = voxel.x * voxel.y * voxel.z;
+
+    const rows = [];
+    rows.push('<tr><th>Label</th><th>Name</th><th>Voxels</th><th>Volume (cm³)</th></tr>');
+    for (const [label, cnt] of counts.entries()) {
+        const vol_cm3 = (cnt * voxel_mm3) / 1000.0;
+        const name = state.labelMap[label] || ('Label_' + label);
+        rows.push(`<tr><td>${label}</td><td>${name}</td><td>${cnt}</td><td>${vol_cm3.toFixed(3)}</td></tr>`);
+    }
+
+    const html = `
+        <html><head><title>Volume Report</title>
+        <style>body{font-family:Arial;margin:10px}table{border-collapse:collapse}th,td{border:1px solid #ccc;padding:6px}</style>
+        </head><body>
+        <h2>Volumetric Analysis</h2>
+        <table>${rows.join('')}</table>
+        </body></html>`;
+
+    const w = window.open('', '_blank');
+    w.document.write(html);
+    w.document.close();
 }
 
 function resetViews() {
@@ -801,6 +900,16 @@ els.inputs.fileMri.addEventListener('change', (e) => {
 els.inputs.fileMask.addEventListener('change', (e) => {
     if(e.target.files[0]) handleMaskLoad(e.target.files[0]);
 });
+
+// Label Config wiring
+els.inputs.btnLoadLabelConfig.addEventListener('click', () => els.inputs.fileLabelConfig.click());
+els.inputs.fileLabelConfig.addEventListener('change', (e) => {
+    if (e.target.files[0]) handleLabelConfigLoad(e.target.files[0]);
+});
+els.inputs.btnSaveLabelConfig.addEventListener('click', (e) => handleLabelConfigSave(e));
+
+// Volumetric analysis
+document.getElementById('btn-calc-volumes').addEventListener('click', () => calculateVolumes());
 
 // Generate
 els.inputs.btnGenerate.addEventListener('click', () => {
