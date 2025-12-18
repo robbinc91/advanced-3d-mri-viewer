@@ -1,4 +1,7 @@
 from PyQt5.QtCore import QThread, pyqtSignal
+import threading
+import numpy as np
+import os
 
 class ExportWorker(QThread):
     """Background worker to generate PDF exports without blocking UI.

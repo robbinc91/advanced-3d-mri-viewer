@@ -2,7 +2,7 @@ from PyQt5.QtWidgets import (QApplication, QMessageBox)
 from src.mri_viewer import MRIViewer
 import sys
 from src.utils.check_imports import *
-
+import traceback
 
 if __name__ == '__main__':
     def excepthook(exc_type, exc_value, exc_tb):
