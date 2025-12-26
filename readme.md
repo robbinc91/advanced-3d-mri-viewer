@@ -86,9 +86,9 @@ pip install -r requirements.txt
 pip install matplotlib pillow reportlab pyvista nibabel
 ```
 
+See `docs/build_linux.md` and `docs/build_windows.md` for build instructions (Linux-first with ITK support is recommended via vcpkg).
+
 Notes:
-- `vtk` can be tricky to install on some platforms; prefer `pip install vtk` or use conda packages if you run into issues.
-- `pyvista` is optional but required for the PyVista-based 3D snapshot helper.
 
 ---
 
