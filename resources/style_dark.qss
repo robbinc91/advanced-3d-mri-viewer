@@ -1,0 +1,138 @@
+/* Dark theme for MRI Viewer Pro - Qt QSS
+   This stylesheet provides a modern dark UI for Qt widgets and tunes QVTKOpenGLNativeWidget background.
+*/
+
+/* General application background and default font color */
+QWidget {
+  background-color: #121315;
+  color: #E6E6E6;
+  selection-background-color: #2A72B5;
+  selection-color: #FFFFFF;
+  font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  font-size: 10pt;
+}
+
+QMainWindow::separator {
+  background: transparent;
+}
+
+/* Group boxes */
+QGroupBox {
+  border: 1px solid #2A2C31;
+  margin-top: 6px;
+  padding: 6px;
+  border-radius: 4px;
+}
+QGroupBox::title {
+  subcontrol-origin: margin;
+  subcontrol-position: top left;
+  padding: 0 6px;
+  color: #D8D8D8;
+}
+
+/* Buttons */
+QPushButton {
+  background-color: #1E2023;
+  border: 1px solid #2A2C31;
+  padding: 6px 10px;
+  border-radius: 4px;
+}
+QPushButton:hover {
+  background-color: #2A2C31;
+}
+QPushButton:pressed {
+  background-color: #151618;
+}
+QPushButton:disabled {
+  color: #7A7A7A;
+}
+
+/* Labels */
+QLabel {
+  color: #E6E6E6;
+}
+
+/* Scroll area */
+QScrollArea, QScrollBar {
+  background: transparent;
+}
+
+/* Sliders, spinboxes and combos */
+QSlider::groove:horizontal {
+  background: #2A2C31;
+  height: 6px;
+  border-radius: 3px;
+}
+QSlider::handle:horizontal {
+  background: #4B90DB;
+  width: 14px;
+  margin: -6px 0;
+  border-radius: 7px;
+}
+QSpinBox, QDoubleSpinBox, QComboBox {
+  background-color: #161718;
+  border: 1px solid #2A2C31;
+  padding: 2px 6px;
+  color: #E6E6E6;
+}
+
+/* Checkboxes */
+QCheckBox {
+  spacing: 6px;
+}
+QCheckBox::indicator {
+  width: 16px; height: 16px;
+}
+QCheckBox::indicator:unchecked {
+  border: 1px solid #2A2C31; background: #1B1B1C;
+}
+QCheckBox::indicator:checked {
+  border: 1px solid #2A2C31; background: #4B90DB;
+}
+
+/* Status bar */
+QStatusBar {
+  background: #0F1112;
+  border-top: 1px solid #232426;
+}
+
+/* Tree / list views */
+QTreeView, QListView, QTableView {
+  background: #101113;
+  alternate-background-color: #0E0F10;
+  selection-background-color: #2A72B5;
+}
+
+/* Tooltips */
+QToolTip {
+  background-color: #232425; color: #FFFFFF; border: 1px solid #3A3A3A;
+}
+
+/* QVTK OpenGL widget tuning: give it an unobtrusive dark background */
+QVTKOpenGLNativeWidget, QWidget#vtkWidget, QWidget[role="vtk"] {
+  background-color: #0B0C0D;
+  border: 1px solid #222428;
+}
+
+/* Make the 3D view a touch brighter to help orientation */
+QVTKOpenGLNativeWidget[view="3d"] {
+  background-color: #0F1112;
+}
+
+/* Dialogs */
+QDialog {
+  background-color: #161718;
+}
+
+/* Hover/Focus rules to provide clearer feedback */
+QWidget:hover { }
+QWidget:focus { outline: none; }
+
+/* Small adjustments for good contrast */
+QLabel.title {
+  font-weight: 600;
+  color: #FFFFFF;
+}
+
+/* Make disabled text clearly greyed */
+QWidget:disabled { color: #7A7A7A; }
