@@ -1698,9 +1698,21 @@
                     const srcY = Math.min(h - 1, row * sample);
                     let x, y, z;
 
-                    if (axis === 'axial') { x = srcX; y = srcY; z = sliceIdx; }
-                    else if (axis === 'sagittal') { x = sliceIdx; y = srcX; z = srcY; }
-                    else if (axis === 'coronal') { x = srcX; y = sliceIdx; z = srcY; }
+                    if (axis === 'axial') {
+                        x = srcX;
+                        y = (d.y - 1) - srcY; // Flip Y: Anterior (top) vs Posterior (bottom)
+                        z = sliceIdx;
+                    }
+                    else if (axis === 'sagittal') {
+                        x = sliceIdx;
+                        y = srcX;
+                        z = (d.z - 1) - srcY; // Flip Z: Superior (head) at top
+                    }
+                    else if (axis === 'coronal') {
+                        x = srcX;
+                        y = sliceIdx;
+                        z = (d.z - 1) - srcY; // Flip Z: Superior (head) at top
+                    }
 
                     if (x < 0 || x >= d.x || y < 0 || y >= d.y || z < 0 || z >= d.z) continue;
 
@@ -2612,9 +2624,21 @@
                                     if (px >= 0 && px < w && py >= 0 && py < h) {
                                         // Map 2D -> 3D index
                                         let vx, vy, vz;
-                                        if (axis === 'axial') { vx = px; vy = py; vz = zSlice; }
-                                        else if (axis === 'sagittal') { vx = zSlice; vy = px; vz = py; }
-                                        else { vx = px; vy = zSlice; vz = py; }
+                                        if (axis === 'axial') {
+                                            vx = px;
+                                            vy = (d.y - 1) - py; // Match rendering flip
+                                            vz = zSlice;
+                                        }
+                                        else if (axis === 'sagittal') {
+                                            vx = zSlice;
+                                            vy = px;
+                                            vz = (d.z - 1) - py; // Match rendering flip
+                                        }
+                                        else {
+                                            vx = px;
+                                            vy = zSlice;
+                                            vz = (d.z - 1) - py; // Match rendering flip
+                                        }
 
                                         if (vx >= 0 && vx < d.x && vy >= 0 && vy < d.y && vz >= 0 && vz < d.z) {
                                             const idx = vx + vy * d.x + vz * strideXY;
@@ -2678,13 +2702,16 @@
 
                         if (axis === 'axial') {
                             state.crosshair.x = Math.max(0, Math.min(d.x - 1, Math.floor(imgX)));
-                            state.crosshair.y = Math.max(0, Math.min(d.y - 1, Math.floor(imgY)));
+                            // Inverse the Y calculation
+                            state.crosshair.y = Math.max(0, Math.min(d.y - 1, (d.y - 1) - Math.floor(imgY)));
                         } else if (axis === 'sagittal') {
                             state.crosshair.y = Math.max(0, Math.min(d.y - 1, Math.floor(imgX)));
-                            state.crosshair.z = Math.max(0, Math.min(d.z - 1, Math.floor(imgY)));
+                            // Inverse the Z calculation
+                            state.crosshair.z = Math.max(0, Math.min(d.z - 1, (d.z - 1) - Math.floor(imgY)));
                         } else if (axis === 'coronal') {
                             state.crosshair.x = Math.max(0, Math.min(d.x - 1, Math.floor(imgX)));
-                            state.crosshair.z = Math.max(0, Math.min(d.z - 1, Math.floor(imgY)));
+                            // Inverse the Z calculation
+                            state.crosshair.z = Math.max(0, Math.min(d.z - 1, (d.z - 1) - Math.floor(imgY)));
                         }
                         renderAll();
                     }
