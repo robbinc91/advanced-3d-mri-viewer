@@ -65,11 +65,17 @@
             font-family: monospace;
             font-size: 12px;
             color: #38bdf8;
-            background-color: rgba(0, 0, 0, 0.6);
-            padding: 2px 4px;
-            border-radius: 2px;
-            pointer-events: none;
+            background-color: rgba(0, 0, 0, 0.7);
+            /* Slightly darker for better contrast */
+            padding: 2px 6px;
+            border-radius: 4px;
             z-index: 10;
+            display: flex;
+            /* Added */
+            align-items: center;
+            /* Added */
+            gap: 8px;
+            /* Added space between text and button */
         }
 
         input[type=range] {
@@ -100,6 +106,37 @@
         input[type=range]:disabled {
             opacity: 0.5;
             cursor: not-allowed;
+        }
+
+        /* Fullscreen/Maximize logic */
+        .viewport.maximized {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 40;
+            /* Above other viewports */
+        }
+
+        .view-control-btn {
+            pointer-events: auto;
+            cursor: pointer;
+            background: rgba(38, 38, 38, 0.8);
+            border-radius: 4px;
+            padding: 2px 6px;
+            margin-left: 8px;
+            transition: background 0.2s;
+        }
+
+        .view-control-btn:hover {
+            background: #0ea5e9;
+            color: white;
+        }
+
+        /* Ensure the grid container is the reference for absolute positioning */
+        #main-grid-container {
+            position: relative;
         }
     </style>
 </head>
@@ -353,17 +390,19 @@
                     <div class="space-y-1 pt-2">
                         <label class="text-neutral-300 block mb-1">Dual View Opacity</label>
                         <div class="flex items-center gap-2">
-                            <input id="input-dual-opacity" type="range" min="0" max="1" step="0.05" value="0.5" class="flex-1">
+                            <input id="input-dual-opacity" type="range" min="0" max="1" step="0.05" value="0.5"
+                                class="flex-1">
                             <span id="val-dual-opacity" class="w-10 text-right font-mono text-sky-400">0.5</span>
                         </div>
                         <p class="text-xs text-neutral-500 mt-1">Blend opacity for the secondary MRI overlay.</p>
                     </div>
                     <div class="space-y-1 pt-2">
                         <label class="text-neutral-300 block mb-1">Dual View Mode</label>
-                        <select id="select-dual-mode" class="w-full bg-neutral-800 border border-neutral-700 text-white rounded p-2 outline-none focus:border-sky-500 text-xs">
+                        <select id="select-dual-mode"
+                            class="w-full bg-neutral-800 border border-neutral-700 text-white rounded p-2 outline-none focus:border-sky-500 text-xs">
                             <option value="blend">Blend (Overlay)</option>
                             <option value="difference">Difference Map</option>
-                            <!--option value="split">Side-by-side Split</option-->
+                            <option value="split">Side-by-side Split</option>
                         </select>
                         <p class="text-xs text-neutral-500 mt-1">Choose how the secondary MRI is visualized.</p>
                     </div>
@@ -403,11 +442,15 @@
         </div>
 
         <!-- Main Grid -->
-        <div class="flex-1 grid grid-cols-2 grid-rows-2 gap-0.5 bg-neutral-900 p-0.5">
+        <!-- Main Grid -->
+        <div id="main-grid-container" class="flex-1 grid grid-cols-2 grid-rows-2 gap-0.5 bg-neutral-900 p-0.5">
 
             <!-- Axial -->
             <div id="view-axial" class="viewport active" data-axis="axial">
-                <div class="overlay-text">AXIAL</div>
+                <div class="overlay-text flex items-center">
+                    <span class="vp-label">AXIAL</span>
+                    <button class="view-control-btn btn-fullscreen" title="Toggle Fullscreen">⛶</button>
+                </div>
                 <div class="flex-1 relative flex items-center justify-center w-full h-full overflow-hidden">
                     <canvas></canvas>
                 </div>
@@ -415,7 +458,10 @@
 
             <!-- Coronal -->
             <div id="view-coronal" class="viewport" data-axis="coronal">
-                <div class="overlay-text">CORONAL</div>
+                <div class="overlay-text flex items-center">
+                    <span class="vp-label">CORONAL</span>
+                    <button class="view-control-btn btn-fullscreen" title="Toggle Fullscreen">⛶</button>
+                </div>
                 <div class="flex-1 relative flex items-center justify-center w-full h-full overflow-hidden">
                     <canvas></canvas>
                 </div>
@@ -423,23 +469,29 @@
 
             <!-- Sagittal -->
             <div id="view-sagittal" class="viewport" data-axis="sagittal">
-                <div class="overlay-text">SAGITTAL</div>
+                <div class="overlay-text flex items-center">
+                    <span class="vp-label">SAGITTAL</span>
+                    <button class="view-control-btn btn-fullscreen" title="Toggle Fullscreen">⛶</button>
+                </div>
                 <div class="flex-1 relative flex items-center justify-center w-full h-full overflow-hidden">
                     <canvas></canvas>
                 </div>
             </div>
 
-            <!-- 3D Placeholder -->
-            <div class="viewport flex items-center justify-center bg-black">
-                <div class="overlay-text text-yellow-500">3D PROJECTION</div>
-                <div class="flex-1 relative flex items-center justify-center w-full h-full overflow-hidden">
-                    <canvas id="canvas-3d"></canvas>
+            <!-- 3D -->
+            <div id="view-3d" class="viewport" data-axis="3d">
+                <div class="overlay-text flex items-center">
+                    <span class="text-yellow-500" class="vp-label">3D PROJECTION</span>
+                    <button class="view-control-btn btn-fullscreen" title="Toggle Fullscreen">⛶</button>
                 </div>
-                <div id="3d-placeholder-text" class="absolute text-center pointer-events-none">
-                    <div
-                        class="w-16 h-16 rounded-full border-2 border-neutral-800 border-t-neutral-600 animate-spin mx-auto mb-2">
+                <div class="flex-1 relative flex items-center justify-center w-full h-full overflow-hidden bg-black">
+                    <canvas id="canvas-3d"></canvas>
+                    <div id="3d-placeholder-text" class="absolute text-center pointer-events-none">
+                        <div
+                            class="w-16 h-16 rounded-full border-2 border-neutral-800 border-t-neutral-600 animate-spin mx-auto mb-2">
+                        </div>
+                        <span class="text-neutral-600 text-xs">Load Data to Render 3D</span>
                     </div>
-                    <span class="text-neutral-600 text-xs">Load Data to Render 3D</span>
                 </div>
             </div>
         </div>
@@ -547,7 +599,7 @@
                 showMask: true,
                 maskOpacity: 0.5,
                 renderQuality: 70
-                ,dualViewEnabled: false,
+                , dualViewEnabled: false,
                 dualViewOpacity: 0.5,
                 dualMode: 'blend' // 'blend' | 'difference'
             },
@@ -1642,10 +1694,10 @@
 
             for (let row = 0; row < srcH; row++) {
                 for (let col = 0; col < srcW; col++) {
-                    // map sampled pixel to source voxel (nearest-neighbor sampling)
                     const srcX = Math.min(w - 1, col * sample);
                     const srcY = Math.min(h - 1, row * sample);
                     let x, y, z;
+
                     if (axis === 'axial') { x = srcX; y = srcY; z = sliceIdx; }
                     else if (axis === 'sagittal') { x = sliceIdx; y = srcX; z = srcY; }
                     else if (axis === 'coronal') { x = srcX; y = sliceIdx; z = srcY; }
@@ -1653,53 +1705,48 @@
                     if (x < 0 || x >= d.x || y < 0 || y >= d.y || z < 0 || z >= d.z) continue;
 
                     const idx = x + y * d.x + z * strideXY;
-                    const val1 = data1[idx];
+                    const mode = state.settings.dualMode || 'blend';
+                    const dualEnabled = state.settings.dualViewEnabled && data2;
 
-                    let [r, g, b, a] = applyWindowLevel(val1, state.settings.windowWidth, state.settings.windowCenter, state.settings.colorMap, state.settings.invert);
+                    let r, g, b, a;
 
-                    // Blend or compute difference with secondary volume if enabled
-                    if (dualEnabled) {
-                        const mode = state.settings.dualMode || 'blend';
-                        const val2 = data2[idx];
-                        if (mode === 'split') {
-                            // Side-by-side vertical split at 50% (image-space horizontal coordinate)
-                            // Use the sampled horizontal coordinate (srcX) so the split is correct
-                            // for all axes (sagittal uses srcX mapped into 'y' previously).
-                            const splitPos = 0.5;
-                            // Use sampled column index (`col`) and sampled width (`srcW`) so
-                            // the split aligns with the tempCanvas columns regardless of sampling.
-                            if (col >= Math.floor(srcW * splitPos)) {
-                                // use secondary voxel if available
-                                if (data2) {
-                                    console.log('using secondary voxel for split view');
-                                    const [rr, gg, bb] = applyWindowLevel(val2, state.settings.windowWidth, state.settings.windowCenter, state.settings.colorMap, state.settings.invert);
-                                    r = rr; g = gg; b = bb;
-                                }
+                    // OPTIMIZED SOURCE SELECTION
+                    if (dualEnabled && mode === 'split') {
+                        // If we are on the right half of the sampled width, use Volume 2
+                        if (col >= Math.floor(srcW * 0.5)) {
+                            const val2 = data2[idx];
+                            [r, g, b, a] = applyWindowLevel(val2, state.settings.windowWidth, state.settings.windowCenter, state.settings.colorMap, state.settings.invert);
+                        } else {
+                            const val1 = data1[idx];
+                            [r, g, b, a] = applyWindowLevel(val1, state.settings.windowWidth, state.settings.windowCenter, state.settings.colorMap, state.settings.invert);
+                        }
+                    } else {
+                        // Standard path for Blend, Difference, or Single View
+                        const val1 = data1[idx];
+                        [r, g, b, a] = applyWindowLevel(val1, state.settings.windowWidth, state.settings.windowCenter, state.settings.colorMap, state.settings.invert);
+
+                        if (dualEnabled) {
+                            const val2 = data2[idx];
+                            if (mode === 'blend') {
+                                const [r2, g2, b2] = applyWindowLevel(val2, state.settings.windowWidth, state.settings.windowCenter, 'hot', false);
+                                const alpha = state.settings.dualViewOpacity || 0.5;
+                                r = r * (1 - alpha) + r2 * alpha;
+                                g = g * (1 - alpha) + g2 * alpha;
+                                b = b * (1 - alpha) + b2 * alpha;
+                            } else if (mode === 'difference') {
+                                const window = state.settings.windowWidth || 1;
+                                let diff = (val1 - val2) / window;
+                                diff = Math.max(-1, Math.min(1, diff));
+                                const alpha = Math.abs(diff);
+                                const diffColor = diff > 0 ? [255, 0, 0] : [0, 0, 255];
+                                r = r * (1 - alpha) + diffColor[0] * alpha;
+                                g = g * (1 - alpha) + diffColor[1] * alpha;
+                                b = b * (1 - alpha) + diffColor[2] * alpha;
                             }
-                        } else if (mode === 'blend') {
-                            // Use hot colormap for secondary to visually distinguish
-                            const [r2, g2, b2] = applyWindowLevel(val2, state.settings.windowWidth, state.settings.windowCenter, 'hot', false);
-                            const alpha = dualAlpha;
-                            r = r * (1 - alpha) + r2 * alpha;
-                            g = g * (1 - alpha) + g2 * alpha;
-                            b = b * (1 - alpha) + b2 * alpha;
-                        } else if (mode === 'difference') {
-                            // Difference map: overlay red for positive diff, blue for negative
-                            const window = state.settings.windowWidth || (state.volume.max - state.volume.min) || 1;
-                            let diff = (val1 - val2) / window; // normalized -1..1 (approx)
-                            diff = Math.max(-1, Math.min(1, diff));
-                            const alpha = Math.min(1, Math.abs(diff));
-                            let diffColor;
-                            if (diff > 0) diffColor = [255 * diff, 0, 0];
-                            else diffColor = [0, 0, 255 * (-diff)];
-
-                            r = r * (1 - alpha) + diffColor[0] * alpha;
-                            g = g * (1 - alpha) + diffColor[1] * alpha;
-                            b = b * (1 - alpha) + diffColor[2] * alpha;
                         }
                     }
 
-                    // Mask Overlay (applied on top of blended result)
+                    // Mask Overlay (Remains same)
                     if (showMask) {
                         const mVal = state.mask.data[idx];
                         const mColor = getLabelRgb(mVal);
@@ -1760,7 +1807,11 @@
 
             ctx.restore();
 
-            container.querySelector('.overlay-text').textContent = `${axis.toUpperCase()} [${sliceIdx}]`;
+            //container.querySelector('.overlay-text').textContent = `${axis.toUpperCase()} [${sliceIdx}]`;
+            const label = container.querySelector('.vp-label');
+            if (label) {
+                label.textContent = `${axis.toUpperCase()} [${sliceIdx}]`;
+            }
         }
 
         // Enhanced 3D render: devicePixelRatio-aware, animation loop, smoother points and depth-based shading
@@ -2124,7 +2175,6 @@
         }
 
         function renderAll() {
-            // Coalesce frequent render requests using requestAnimationFrame
             if (renderAll._scheduled) return;
             renderAll._scheduled = true;
             requestAnimationFrame(() => {
@@ -2132,6 +2182,8 @@
                 drawViewport('axial');
                 drawViewport('sagittal');
                 drawViewport('coronal');
+                // Only trigger 3D if it's currently visible/relevant
+                if (state.mask) render3D();
                 updateInfo();
             });
         }
@@ -2501,23 +2553,28 @@
                 // Helper to paint
                 const paintAt = (clientX, clientY) => {
                     const canvas = container.querySelector('canvas');
-                    const rect = canvas.getBoundingClientRect();
+                    const rect = canvas.getBoundingClientRect(); // Get CSS size
                     const vpState = state.ui.viewports[axis];
                     const d = state.volume.dims;
+
                     let w, h;
                     if (axis === 'axial') { w = d.x; h = d.y; }
                     else if (axis === 'sagittal') { w = d.y; h = d.z; }
                     else { w = d.x; h = d.z; }
 
-                    const scaleX = canvas.width / w;
-                    const scaleY = canvas.height / h;
+                    // Use rect (CSS pixels) instead of canvas.width (buffer pixels)
+                    const scaleX = rect.width / w;
+                    const scaleY = rect.height / h;
                     const baseScale = Math.min(scaleX, scaleY);
                     const totalScale = baseScale * vpState.zoom;
-                    const offsetX = (canvas.width - w * baseScale) / 2;
-                    const offsetY = (canvas.height - h * baseScale) / 2;
+
+                    const offsetX = (rect.width - w * baseScale) / 2;
+                    const offsetY = (rect.height - h * baseScale) / 2;
 
                     const mouseX = clientX - rect.left;
                     const mouseY = clientY - rect.top;
+
+                    // Reverse the transformation precisely
                     const imgX = (mouseX - (offsetX + vpState.pan.x)) / totalScale;
                     const imgY = (mouseY - (offsetY + vpState.pan.y)) / totalScale;
 
@@ -2594,37 +2651,31 @@
                     } else if (tool === 'nav') {
                         // CROSSHAIR LOGIC
                         const canvas = container.querySelector('canvas');
-                        // We need to map mouse coordinates back to Image Space
-                        // This reverses the transforms in drawViewport
                         const rect = canvas.getBoundingClientRect();
                         const vpState = state.ui.viewports[axis];
 
-                        // Get slice dims
                         let w, h;
                         const d = state.volume.dims;
                         if (axis === 'axial') { w = d.x; h = d.y; }
                         else if (axis === 'sagittal') { w = d.y; h = d.z; }
                         else if (axis === 'coronal') { w = d.x; h = d.z; }
 
-                        // Calculate scales used in draw
-                        const scaleX = canvas.width / w;
-                        const scaleY = canvas.height / h;
+                        // Use CSS pixels (rect) for scaling calculation
+                        const scaleX = rect.width / w;
+                        const scaleY = rect.height / h;
                         const baseScale = Math.min(scaleX, scaleY);
                         const totalScale = baseScale * vpState.zoom;
 
-                        // Calculate offsets used in draw
-                        const offsetX = (canvas.width - w * baseScale) / 2;
-                        const offsetY = (canvas.height - h * baseScale) / 2;
+                        const offsetX = (rect.width - w * baseScale) / 2;
+                        const offsetY = (rect.height - h * baseScale) / 2;
 
-                        // Inverse transform
-                        // Mouse -> remove Pan -> remove Center Offset -> Scale down
                         const mouseX = (mv.clientX - rect.left);
                         const mouseY = (mv.clientY - rect.top);
 
+                        // Precise inverse transform
                         const imgX = (mouseX - (offsetX + vpState.pan.x)) / totalScale;
                         const imgY = (mouseY - (offsetY + vpState.pan.y)) / totalScale;
 
-                        // Apply to crosshair
                         if (axis === 'axial') {
                             state.crosshair.x = Math.max(0, Math.min(d.x - 1, Math.floor(imgX)));
                             state.crosshair.y = Math.max(0, Math.min(d.y - 1, Math.floor(imgY)));
@@ -2761,6 +2812,32 @@
             render3D();
         });
 
+        // Fullscreen Toggle Logic
+        document.querySelectorAll('.btn-fullscreen').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation(); // Don't trigger crosshair move
+
+                const viewport = btn.closest('.viewport');
+                const isMaximized = viewport.classList.contains('maximized');
+
+                // Remove maximized from all others
+                document.querySelectorAll('.viewport').forEach(v => v.classList.remove('maximized'));
+
+                if (!isMaximized) {
+                    viewport.classList.add('maximized');
+                    btn.textContent = '❐'; // Change icon to "restore"
+                } else {
+                    btn.textContent = '⛶'; // Change icon back to "expand"
+                }
+
+                // Crucial: Re-render after the CSS transition/layout change
+                // We use a small timeout to ensure the DOM has updated dimensions
+                setTimeout(() => {
+                    renderAll();
+                    if (viewport.id === 'view-3d') render3D();
+                }, 50);
+            });
+        });
     </script>
 </body>
 
