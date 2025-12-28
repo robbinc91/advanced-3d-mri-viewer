@@ -132,6 +132,17 @@
                         </button>
                     </div>
 
+                    <div class="grid grid-cols-2 gap-2 mt-2">
+                        <button id="btn-load-mri2"
+                            class="py-2 px-3 rounded text-white font-medium bg-purple-700 hover:bg-purple-600 transition-colors">
+                            Load MRI 2
+                        </button>
+                        <div class="flex items-center gap-2">
+                            <input type="checkbox" id="check-dual-view" class="w-4 h-4 accent-sky-500">
+                            <label for="check-dual-view" class="text-xs text-neutral-300">Enable Dual View</label>
+                        </div>
+                    </div>
+
                     <button id="btn-generate"
                         class="w-full py-2 px-3 rounded text-neutral-300 font-medium bg-neutral-800 hover:bg-neutral-700 transition-colors border border-neutral-700">
                         Generate Phantom
@@ -140,6 +151,7 @@
                     <!-- Hidden Inputs -->
                     <input type="file" id="input-file-mri" class="hidden" accept=".nii,.nii.gz,.img,.hdr">
                     <input type="file" id="input-file-mask" class="hidden" accept=".nii,.nii.gz,.img,.hdr">
+                    <input type="file" id="input-file-mri2" class="hidden" accept=".nii,.nii.gz,.img,.hdr">
                     <input type="file" id="input-file-label-config" class="hidden" accept=".json">
 
                     <div class="mt-2 grid grid-cols-2 gap-2">
@@ -339,6 +351,23 @@
                         </select>
                     </div>
                     <div class="space-y-1 pt-2">
+                        <label class="text-neutral-300 block mb-1">Dual View Opacity</label>
+                        <div class="flex items-center gap-2">
+                            <input id="input-dual-opacity" type="range" min="0" max="1" step="0.05" value="0.5" class="flex-1">
+                            <span id="val-dual-opacity" class="w-10 text-right font-mono text-sky-400">0.5</span>
+                        </div>
+                        <p class="text-xs text-neutral-500 mt-1">Blend opacity for the secondary MRI overlay.</p>
+                    </div>
+                    <div class="space-y-1 pt-2">
+                        <label class="text-neutral-300 block mb-1">Dual View Mode</label>
+                        <select id="select-dual-mode" class="w-full bg-neutral-800 border border-neutral-700 text-white rounded p-2 outline-none focus:border-sky-500 text-xs">
+                            <option value="blend">Blend (Overlay)</option>
+                            <option value="difference">Difference Map</option>
+                            <!--option value="split">Side-by-side Split</option-->
+                        </select>
+                        <p class="text-xs text-neutral-500 mt-1">Choose how the secondary MRI is visualized.</p>
+                    </div>
+                    <div class="space-y-1 pt-2">
                         <label class="text-neutral-300 block mb-1">Render Quality</label>
                         <div class="flex items-center gap-2">
                             <input id="input-render-quality" type="range" min="1" max="100" step="1" value="70"
@@ -505,6 +534,7 @@
          */
         const state = {
             volume: null, // { data: Float32Array, dims: {x,y,z}, min, max }
+            secondaryVolume: null,
             mask: null,   // { data: Float32Array, dims: {x,y,z} }
             crosshair: { x: 0, y: 0, z: 0 },
             activeAxis: 'axial',
@@ -517,6 +547,9 @@
                 showMask: true,
                 maskOpacity: 0.5,
                 renderQuality: 70
+                ,dualViewEnabled: false,
+                dualViewOpacity: 0.5,
+                dualMode: 'blend' // 'blend' | 'difference'
             },
             ui: {
                 rotate3D: { x: 0, y: 0 },
@@ -835,8 +868,10 @@
                 colormap: document.getElementById('select-colormap'),
                 btnGenerate: document.getElementById('btn-generate'),
                 btnLoadMri: document.getElementById('btn-load-mri'),
+                btnLoadMri2: document.getElementById('btn-load-mri2'),
                 btnLoadMask: document.getElementById('btn-load-mask'),
                 fileMri: document.getElementById('input-file-mri'),
+                fileMri2: document.getElementById('input-file-mri2'),
                 fileMask: document.getElementById('input-file-mask'),
                 fileLabelConfig: document.getElementById('input-file-label-config'),
                 btnLoadLabelConfig: document.getElementById('btn-load-label-config'),
@@ -844,6 +879,9 @@
                 btnReset: document.getElementById('btn-reset'),
                 maskCheck: document.getElementById('check-mask'),
                 maskOpacity: document.getElementById('input-mask-opacity'),
+                dualCheck: document.getElementById('check-dual-view'),
+                dualOpacity: document.getElementById('input-dual-opacity'),
+                dualMode: document.getElementById('select-dual-mode'),
                 opSelect: document.getElementById('select-img-op'),
                 btnRunOp: document.getElementById('btn-run-op'),
                 opStatus: document.getElementById('op-status')
@@ -925,6 +963,43 @@
                 render3D();
             } catch (err) {
                 alert("Error loading MRI: " + err.message);
+            } finally {
+                els.labels.loading.classList.add('hidden');
+            }
+        }
+
+        async function handleMri2Load(file) {
+            els.labels.loading.classList.remove('hidden');
+            els.labels.loading.textContent = `Loading secondary ${file.name}...`;
+            try {
+                const vol = await loadFile(file);
+                // If primary exists, dims must match
+                if (state.volume) {
+                    const vd = state.volume.dims;
+                    const sd = vol.dims;
+                    if (vd.x !== sd.x || vd.y !== sd.y || vd.z !== sd.z) {
+                        throw new Error(`Dimension mismatch: Primary ${vd.x}x${vd.y}x${vd.z} vs Secondary ${sd.x}x${sd.y}x${sd.z}`);
+                    }
+                }
+
+                if (!state.volume) {
+                    // If no primary exists, make this the primary volume
+                    state.volume = vol;
+                    state.secondaryVolume = null;
+                    // Reset crosshair to center
+                    const d = vol.dims;
+                    state.crosshair = { x: Math.floor(d.x / 2), y: Math.floor(d.y / 2), z: Math.floor(d.z / 2) };
+                } else {
+                    state.secondaryVolume = vol;
+                    // Enable dual-view automatically when a secondary is loaded
+                    state.settings.dualViewEnabled = true;
+                    if (els.inputs.dualCheck) els.inputs.dualCheck.checked = true;
+                }
+
+                renderAll();
+                render3D();
+            } catch (err) {
+                alert("Error loading secondary MRI: " + err.message);
             } finally {
                 els.labels.loading.classList.add('hidden');
             }
@@ -1549,7 +1624,11 @@
             // 1. GENERATE PIXELS (Sampled Source Resolution)
             const imgData = tempCtx.createImageData(srcW, srcH);
             const pixels = imgData.data;
-            const { data } = state.volume;
+            const vol1 = state.volume;
+            if (!vol1) return;
+            const data1 = vol1.data;
+            const vol2 = state.secondaryVolume;
+            const data2 = vol2 ? vol2.data : null;
             const strideXY = d.x * d.y;
 
             const sliceIdx = axis === 'axial' ? state.crosshair.z :
@@ -1558,6 +1637,8 @@
 
             const showMask = state.mask && state.settings.showMask;
             const maskOp = state.settings.maskOpacity;
+            const dualEnabled = state.settings.dualViewEnabled && data2;
+            const dualAlpha = dualEnabled ? (state.settings.dualViewOpacity || 0.5) : 0;
 
             for (let row = 0; row < srcH; row++) {
                 for (let col = 0; col < srcW; col++) {
@@ -1572,11 +1653,53 @@
                     if (x < 0 || x >= d.x || y < 0 || y >= d.y || z < 0 || z >= d.z) continue;
 
                     const idx = x + y * d.x + z * strideXY;
-                    const val = data[idx];
+                    const val1 = data1[idx];
 
-                    let [r, g, b, a] = applyWindowLevel(val, state.settings.windowWidth, state.settings.windowCenter, state.settings.colorMap, state.settings.invert);
+                    let [r, g, b, a] = applyWindowLevel(val1, state.settings.windowWidth, state.settings.windowCenter, state.settings.colorMap, state.settings.invert);
 
-                    // Mask Overlay
+                    // Blend or compute difference with secondary volume if enabled
+                    if (dualEnabled) {
+                        const mode = state.settings.dualMode || 'blend';
+                        const val2 = data2[idx];
+                        if (mode === 'split') {
+                            // Side-by-side vertical split at 50% (image-space horizontal coordinate)
+                            // Use the sampled horizontal coordinate (srcX) so the split is correct
+                            // for all axes (sagittal uses srcX mapped into 'y' previously).
+                            const splitPos = 0.5;
+                            // Use sampled column index (`col`) and sampled width (`srcW`) so
+                            // the split aligns with the tempCanvas columns regardless of sampling.
+                            if (col >= Math.floor(srcW * splitPos)) {
+                                // use secondary voxel if available
+                                if (data2) {
+                                    console.log('using secondary voxel for split view');
+                                    const [rr, gg, bb] = applyWindowLevel(val2, state.settings.windowWidth, state.settings.windowCenter, state.settings.colorMap, state.settings.invert);
+                                    r = rr; g = gg; b = bb;
+                                }
+                            }
+                        } else if (mode === 'blend') {
+                            // Use hot colormap for secondary to visually distinguish
+                            const [r2, g2, b2] = applyWindowLevel(val2, state.settings.windowWidth, state.settings.windowCenter, 'hot', false);
+                            const alpha = dualAlpha;
+                            r = r * (1 - alpha) + r2 * alpha;
+                            g = g * (1 - alpha) + g2 * alpha;
+                            b = b * (1 - alpha) + b2 * alpha;
+                        } else if (mode === 'difference') {
+                            // Difference map: overlay red for positive diff, blue for negative
+                            const window = state.settings.windowWidth || (state.volume.max - state.volume.min) || 1;
+                            let diff = (val1 - val2) / window; // normalized -1..1 (approx)
+                            diff = Math.max(-1, Math.min(1, diff));
+                            const alpha = Math.min(1, Math.abs(diff));
+                            let diffColor;
+                            if (diff > 0) diffColor = [255 * diff, 0, 0];
+                            else diffColor = [0, 0, 255 * (-diff)];
+
+                            r = r * (1 - alpha) + diffColor[0] * alpha;
+                            g = g * (1 - alpha) + diffColor[1] * alpha;
+                            b = b * (1 - alpha) + diffColor[2] * alpha;
+                        }
+                    }
+
+                    // Mask Overlay (applied on top of blended result)
                     if (showMask) {
                         const mVal = state.mask.data[idx];
                         const mColor = getLabelRgb(mVal);
@@ -2042,9 +2165,14 @@
         // File Buttons
         els.inputs.btnLoadMri.addEventListener('click', () => els.inputs.fileMri.click());
         els.inputs.btnLoadMask.addEventListener('click', () => els.inputs.fileMask.click());
+        if (els.inputs.btnLoadMri2) els.inputs.btnLoadMri2.addEventListener('click', () => els.inputs.fileMri2.click());
 
         els.inputs.fileMri.addEventListener('change', (e) => {
             if (e.target.files[0]) handleMriLoad(e.target.files[0]);
+        });
+
+        if (els.inputs.fileMri2) els.inputs.fileMri2.addEventListener('change', (e) => {
+            if (e.target.files[0]) handleMri2Load(e.target.files[0]);
         });
 
         els.inputs.fileMask.addEventListener('change', (e) => {
@@ -2322,6 +2450,29 @@
             state.settings.colorMap = e.target.value;
             renderAll();
         });
+        if (els.inputs.dualCheck) {
+            els.inputs.dualCheck.addEventListener('change', (e) => {
+                state.settings.dualViewEnabled = e.target.checked;
+                renderAll();
+                render3D();
+            });
+        }
+        if (els.inputs.dualOpacity) {
+            const dualVal = document.getElementById('val-dual-opacity');
+            els.inputs.dualOpacity.addEventListener('input', (e) => {
+                const v = Number(e.target.value);
+                state.settings.dualViewOpacity = v;
+                if (dualVal) dualVal.textContent = String(v.toFixed(2));
+                renderAll();
+            });
+        }
+        if (els.inputs.dualMode) {
+            els.inputs.dualMode.value = state.settings.dualMode || 'blend';
+            els.inputs.dualMode.addEventListener('change', (e) => {
+                state.settings.dualMode = e.target.value;
+                renderAll();
+            });
+        }
         els.inputs.btnReset.addEventListener('click', () => {
             if (state.volume) {
                 const d = state.volume.dims;
