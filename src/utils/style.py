@@ -132,6 +132,62 @@ QStatusBar {
     background-color: #171717;
     border-top: 1px solid #262626;
 }
+#leftPanelScroll {
+    background-color: #171717;
+    border-right: 1px solid #262626;
+}
+
+/* Ensure buttons and inputs have reasonable minimum heights but can scale */
+QPushButton, QComboBox, QSpinBox, QDoubleSpinBox {
+    min-height: 28px;
+    padding: 2px 8px;
+}
+
+/* Fix GroupBox spacing for small screens */
+QGroupBox {
+    margin-top: 15px;
+    padding-top: 10px;
+    font-size: 9pt; /* Slightly smaller headers for better fit */
+}
+QScrollBar:vertical {
+    border: none;
+    background: #171717; /* Same as sidebar background */
+    width: 10px;
+    margin: 0px 0px 0px 0px;
+}
+
+QScrollBar::handle:vertical {
+    background: #3f3f46; /* Neutral-700 */
+    min-height: 30px;
+    border-radius: 5px;
+    margin: 2px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: #52525b; /* Neutral-600 - highlights on hover */
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px; /* Removes the arrows for a cleaner look */
+}
+
+QScrollBar:horizontal {
+    border: none;
+    background: #171717;
+    height: 10px;
+    margin: 0px;
+}
+
+QScrollBar::handle:horizontal {
+    background: #3f3f46;
+    min-width: 30px;
+    border-radius: 5px;
+    margin: 2px;
+}
+
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0px;
+}
 """
 
 MAIN_STYLE = """
@@ -193,4 +249,5 @@ QSlider::handle:vertical {
     margin: 0 -5px;
     border-radius: 8px;
 }
+
 """
