@@ -7,10 +7,8 @@
     <title>NeuroView Web Pro</title>
     <script src="tailwindscss.js"></script>
     <script src="pako.min.js"></script>
-    <!-- Optional libraries for advanced features -->
+    <!-- Optional libraries loaded lazily on demand -->
     <script src="https://unpkg.com/nifti-reader-js/dist/nifti-reader.min.js"></script>
-    <script src="vtk.js"></script>
-    <script src="plotly.min.js"></script>
     <style>
         body {
             background-color: #000;
@@ -135,10 +133,57 @@
         }
 
         /* Ensure the grid container is the reference for absolute positioning */
-        #main-grid-container {
-            position: relative;
-        }
-    </style>
+    
+    .lazy-loading-overlay {
+        position: absolute;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.85);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        z-index: 50;
+        color: #94a3b8;
+        font-size: 13px;
+        gap: 12px;
+    }
+
+    .lazy-loading-overlay.hidden {
+        display: none;
+    }
+
+    .lazy-spinner {
+        width: 32px;
+        height: 32px;
+        border: 2px solid #334155;
+        border-top-color: #0ea5e9;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin {
+        to { transform: rotate(360deg); }
+    }
+
+    .progress-bar {
+        width: 120px;
+        height: 4px;
+        background: #334155;
+        border-radius: 2px;
+        overflow: hidden;
+    }
+
+    .progress-fill {
+        height: 100%;
+        background: #0ea5e9;
+        width: 0%;
+        transition: width 0.3s ease;
+    }
+
+    #main-grid-container {
+        position: relative;
+    }
+</style>
 </head>
 
 <body>
@@ -492,6 +537,17 @@
                         </div>
                         <span class="text-neutral-600 text-xs">Load Data to Render 3D</span>
                     </div>
+                    <div id="vtk-loading" class="lazy-loading-overlay hidden">
+                        <div class="lazy-spinner"></div>
+                        <div>Loading VTK.js...</div>
+                        <div class="progress-bar">
+                            <div id="vtk-progress" class="progress-fill"></div>
+                        </div>
+                    </div>
+                    <div id="3d-rendering" class="lazy-loading-overlay hidden">
+                        <div class="lazy-spinner"></div>
+                        <div>Rendering 3D...</div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -617,6 +673,80 @@
             }
             ,
             labelMap: {} // mapping integer label -> name
+        };
+
+        /**
+         * LAZY LOADING FOR HEAVY LIBRARIES
+         */
+        const LibraryLoader = {
+            vtk: null,
+            vtkLoading: false,
+            vtkPromise: null,
+
+            async loadVTK() {
+                if (this.vtk) return this.vtk;
+                if (this.vtkLoading) return this.vtkPromise;
+
+                this.vtkLoading = true;
+
+                const loadingEl = document.getElementById('vtk-loading');
+                const progressEl = document.getElementById('vtk-progress');
+                if (loadingEl) loadingEl.classList.remove('hidden');
+
+                this.vtkPromise = new Promise(async (resolve, reject) => {
+                    try {
+                        const response = await fetch('vtk.js', { mode: 'cors' });
+                        if (!response.ok) throw new Error('Failed to fetch VTK.js');
+
+                        const total = parseInt(response.headers.get('content-length') || '0', 10);
+                        const reader = response.body.getReader();
+                        const chunks = [];
+
+                        let received = 0;
+                        while (true) {
+                            const { done, value } = await reader.read();
+                            if (done) break;
+                            chunks.push(value);
+                            received += value.length;
+
+                            if (total && progressEl) {
+                                const percent = Math.round((received / total) * 100);
+                                progressEl.style.width = percent + '%';
+                            }
+                        }
+
+                        const allChunks = new Uint8Array(received);
+                        let position = 0;
+                        for (const chunk of chunks) {
+                            allChunks.set(chunk, position);
+                            position += chunk.length;
+                        }
+
+                        const script = document.createElement('script');
+                        script.textContent = new TextDecoder('utf-8').decode(allChunks);
+                        document.head.appendChild(script);
+
+                        if (typeof vtk === 'undefined') {
+                            throw new Error('VTK.js failed to initialize');
+                        }
+
+                        this.vtk = vtk;
+                        if (loadingEl) loadingEl.classList.add('hidden');
+                        document.getElementById('3d-rendering')?.classList.add('hidden');
+                        resolve(vtk);
+                    } catch (err) {
+                        console.error('Failed to load VTK.js:', err);
+                        if (loadingEl) {
+                            loadingEl.innerHTML = '<div class="text-red-400">Failed to load VTK.js</div>';
+                        }
+                        reject(err);
+                    } finally {
+                        this.vtkLoading = false;
+                    }
+                });
+
+                return this.vtkPromise;
+            }
         };
 
         /**
@@ -1010,9 +1140,8 @@
                 els.labels.ww.textContent = Math.round(state.settings.windowWidth);
                 els.labels.wc.textContent = Math.round(state.settings.windowCenter);
 
-                renderAll();
+                renderAll(false);
                 els.labels.text3d.classList.add('hidden');
-                render3D();
             } catch (err) {
                 alert("Error loading MRI: " + err.message);
             } finally {
@@ -1048,8 +1177,7 @@
                     if (els.inputs.dualCheck) els.inputs.dualCheck.checked = true;
                 }
 
-                renderAll();
-                render3D();
+                renderAll(false);
             } catch (err) {
                 alert("Error loading secondary MRI: " + err.message);
             } finally {
@@ -1076,8 +1204,7 @@
                 state.mask = mask;
                 els.labels.maskGroup.classList.remove('opacity-50', 'pointer-events-none');
                 populateLabelColorUI();
-                renderAll();
-                render3D();
+                renderAll(true);
             } catch (err) {
                 alert(err.message);
             } finally {
@@ -1794,7 +1921,8 @@
             ctx.save();
 
             // Apply transforms: Translate Center -> Apply Pan -> Apply Zoom -> Apply Base Scale
-            ctx.translate(offsetX + vpState.pan.x, offsetY + vpState.pan.y);
+            // Note: Pan is stored in CSS pixels, so scale it by baseScale to apply before zoom scaling
+            ctx.translate(offsetX + vpState.pan.x * baseScale, offsetY + vpState.pan.y * baseScale);
             ctx.scale(baseScale * vpState.zoom, baseScale * vpState.zoom);
 
             // Draw sampled tempCanvas scaled back to full image size in image-space coordinates
@@ -1826,163 +1954,413 @@
             }
         }
 
-        // Enhanced 3D render: devicePixelRatio-aware, animation loop, smoother points and depth-based shading
+        // Enhanced 3D render: optimized with caching and proper LOD
         let _3d_animHandle = null;
         state.ui._3dRotateVel = { x: 0, y: 0 };
-        function render3D() {
-            // Render only when a mask is present (3D view shows mask-only)
-            if (!state.mask || !state.settings.showMask) {
-                // show placeholder asking user to load mask
-                els.labels.text3d.classList.remove('hidden');
-                // dispose vtk instance if any
-                if (state.ui && state.ui.vtk) disposeVTK3D();
+        state.ui.vtkLoading = false;
+
+        // 3D caching system
+        const _3dCache = {
+            canvas: null,
+            ctx: null,
+            points: null,
+            lastMaskId: null,
+            lastQuality: 70,
+            lastDims: null,
+            needsRegen: true
+        };
+
+        function _3dInitCache() {
+            if (!_3dCache.canvas) {
+                _3dCache.canvas = document.createElement('canvas');
+                _3dCache.ctx = _3dCache.canvas.getContext('2d');
+            }
+        }
+
+        function _3dRegeneratePoints() {
+            if (!state.mask || !state.volume) {
+                _3dCache.points = null;
+                _3dCache.glPoints = null;
                 return;
             }
-            // If vtk.js is available, prefer high-fidelity volume rendering via vtk
-            if (typeof vtk !== 'undefined') {
-                try {
-                    if (!state.ui.vtk || !state.ui.vtk.initialized) initVTK3D(els.viewports.v3d.parentElement);
-                    updateVTKVolume();
-                    return;
-                } catch (err) {
-                    console.warn('vtk.js render failed, falling back to canvas renderer', err);
+
+            const d = state.volume.dims;
+            const q = state.settings.renderQuality || 70;
+
+            const maskId = state.mask._cacheId || (state.mask._cacheId = Math.random());
+            const dimsKey = `${d.x}-${d.y}-${d.z}`;
+
+            if (_3dCache.lastMaskId === maskId &&
+                _3dCache.lastQuality === q &&
+                _3dCache.lastDims === dimsKey &&
+                _3dCache.points) {
+                return;
+            }
+
+            _3dCache.lastMaskId = maskId;
+            _3dCache.lastQuality = q;
+            _3dCache.lastDims = dimsKey;
+
+            const totalVoxels = d.x * d.y * d.z;
+            const targetPoints = Math.max(1000, Math.min(10000, Math.round(500 + (q / 100) * 8000)));
+            const approxStride = Math.pow(totalVoxels / targetPoints, 1 / 3);
+            const stride = Math.max(1, Math.floor(approxStride));
+
+            const points = [];
+            const strideXY = d.x * d.y;
+            const maskData = state.mask.data;
+
+            const cx = d.x / 2, cy = d.y / 2, cz = d.z / 2;
+
+            for (let z = 0; z < d.z; z += stride) {
+                const zOffset = z * strideXY;
+                for (let y = 0; y < d.y; y += stride) {
+                    const yzOffset = y * d.x + zOffset;
+                    for (let x = 0; x < d.x; x += stride) {
+                        const idx = x + yzOffset;
+                        const mv = maskData[idx];
+                        if (mv > 0) {
+                            const col = getLabelRgb(mv) || [255, 100, 100];
+                            points.push({
+                                x: (x - cx) / d.x,
+                                y: (y - cy) / d.y,
+                                z: (z - cz) / d.z,
+                                color: col
+                            });
+                        }
+                    }
                 }
             }
-            const canvas = els.viewports.v3d;
-            const ctx = canvas.getContext('2d');
 
+            points.sort((a, b) => a.z - b.z);
+            _3dCache.points = points;
+            _3dCache.glPoints = null;
+            _3dCache.needsRegen = false;
+        }
+
+        const _3dGL = {
+            canvas: null,
+            gl: null,
+            program: null,
+            buffers: null
+        };
+
+        function _3dInitWebGL() {
+            if (_3dGL.gl) return true;
+
+            const canvas = document.createElement('canvas');
+            canvas.style.display = 'none';
+            document.body.appendChild(canvas);
+            _3dGL.canvas = canvas;
+
+            const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+            if (!gl) return false;
+
+            _3dGL.gl = gl;
+
+            const vsSource = `
+                attribute vec3 aPosition;
+                attribute vec3 aColor;
+                varying vec3 vColor;
+                varying float vDepth;
+                uniform float uAngleX;
+                uniform float uAngleY;
+                uniform float uScale;
+                uniform vec2 uResolution;
+
+                void main() {
+                    float cx = cos(uAngleX), sx = sin(uAngleX);
+                    float cy = cos(uAngleY), sy = sin(uAngleY);
+
+                    float x1 = aPosition.x * cy - aPosition.z * sy;
+                    float z1 = aPosition.x * sy + aPosition.z * cy;
+                    float y2 = aPosition.y * cx - z1 * sx;
+
+                    gl_Position = vec4(x1 * uScale, y2 * uScale, z1 * 0.5 + 0.5, 1.0);
+                    gl_PointSize = max(1.0, 4.0 - z1 * 2.0);
+                    vColor = aColor;
+                    vDepth = z1;
+                }
+            `;
+
+            const fsSource = `
+                precision mediump float;
+                varying vec3 vColor;
+                varying float vDepth;
+
+                void main() {
+                    float alpha = 0.9 - vDepth * 0.6;
+                    gl_FragColor = vec4(vColor, alpha);
+                }
+            `;
+
+            const vs = gl.createShader(gl.VERTEX_SHADER);
+            gl.shaderSource(vs, vsSource);
+            gl.compileShader(vs);
+
+            const fs = gl.createShader(gl.FRAGMENT_SHADER);
+            gl.shaderSource(fs, fsSource);
+            gl.compileShader(fs);
+
+            const program = gl.createProgram();
+            gl.attachShader(program, vs);
+            gl.attachShader(program, fs);
+            gl.linkProgram(program);
+
+            if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+                console.error('WebGL program link error:', gl.getProgramInfoLog(program));
+                return false;
+            }
+
+            _3dGL.program = program;
+            return true;
+        }
+
+        function _3dRenderWebGL() {
+            if (!_3dGL.gl && !_3dInitWebGL()) {
+                return false;
+            }
+
+            if (!_3dCache.points || _3dCache.points.length === 0) {
+                return false;
+            }
+
+            const gl = _3dGL.gl;
+            const canvas = _3dGL.canvas;
+            const rect = els.viewports.v3d.parentElement.getBoundingClientRect();
+
+            canvas.width = rect.width;
+            canvas.height = rect.height;
+            gl.viewport(0, 0, canvas.width, canvas.height);
+
+            gl.clearColor(0.04, 0.04, 0.06, 1.0);
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+            gl.enable(gl.BLEND);
+            gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+
+            const program = _3dGL.program;
+            gl.useProgram(program);
+
+            if (!_3dCache.glPoints) {
+                const points = _3dCache.points;
+                const positions = new Float32Array(points.length * 3);
+                const colors = new Float32Array(points.length * 3);
+
+                for (let i = 0; i < points.length; i++) {
+                    const p = points[i];
+                    positions[i * 3] = p.x;
+                    positions[i * 3 + 1] = p.y;
+                    positions[i * 3 + 2] = p.z;
+                    colors[i * 3] = p.color[0] / 255;
+                    colors[i * 3 + 1] = p.color[1] / 255;
+                    colors[i * 3 + 2] = p.color[2] / 255;
+                }
+
+                const posBuffer = gl.createBuffer();
+                gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+                gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+
+                const colorBuffer = gl.createBuffer();
+                gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+                gl.bufferData(gl.ARRAY_BUFFER, colors, gl.STATIC_DRAW);
+
+                _3dCache.glBuffers = { pos: posBuffer, color: colorBuffer };
+                _3dCache.glPointCount = points.length;
+            }
+
+            const angleX = state.ui.rotate3D.x + Math.PI / 6;
+            const angleY = state.ui.rotate3D.y + Math.PI / 6;
+            const scale = 0.35;
+
+            gl.uniform1f(gl.getUniformLocation(program, 'uAngleX'), angleX);
+            gl.uniform1f(gl.getUniformLocation(program, 'uAngleY'), angleY);
+            gl.uniform1f(gl.getUniformLocation(program, 'uScale'), scale);
+            gl.uniform2f(gl.getUniformLocation(program, 'uResolution'), canvas.width, canvas.height);
+
+            const posLoc = gl.getAttribLocation(program, 'aPosition');
+            gl.bindBuffer(gl.ARRAY_BUFFER, _3dCache.glBuffers.pos);
+            gl.enableVertexAttribArray(posLoc);
+            gl.vertexAttribPointer(posLoc, 3, gl.FLOAT, false, 0, 0);
+
+            const colorLoc = gl.getAttribLocation(program, 'aColor');
+            gl.bindBuffer(gl.ARRAY_BUFFER, _3dCache.glBuffers.color);
+            gl.enableVertexAttribArray(colorLoc);
+            gl.vertexAttribPointer(colorLoc, 3, gl.FLOAT, false, 0, 0);
+
+            gl.drawArrays(gl.POINTS, 0, _3dCache.glPointCount);
+
+            return true;
+        }
+
+        function render3D() {
+            if (!state.mask || !state.settings.showMask) {
+                els.labels.text3d.classList.remove('hidden');
+                disposeVTK3D();
+                _3dCache.glPoints = null;
+                document.getElementById('3d-rendering')?.classList.add('hidden');
+                return;
+            }
+
+            els.labels.text3d.classList.add('hidden');
+            document.getElementById('3d-rendering')?.classList.remove('hidden');
+
+            const useVTK = typeof vtk !== 'undefined';
+
+            if (useVTK) {
+                try {
+                    const container = els.viewports.v3d.parentElement;
+                    if (!state.ui.vtk || !state.ui.vtk.initialized) {
+                        initVTK3D(container);
+                    }
+                    _3dCache.glPoints = null;
+                    updateVTKVolume();
+                    document.getElementById('3d-rendering')?.classList.add('hidden');
+                    return;
+                } catch (err) {
+                    console.warn('VTK render failed, falling back to canvas:', err);
+                }
+            }
+
+            if (!useVTK && !state.ui.vtkLoading) {
+                state.ui.vtkLoading = true;
+                LibraryLoader.loadVTK().then(() => {
+                    state.ui.vtkLoading = false;
+                    document.getElementById('3d-rendering')?.classList.add('hidden');
+                    if (state.mask && state.settings.showMask) {
+                        try {
+                            const container = els.viewports.v3d.parentElement;
+                            initVTK3D(container);
+                            _3dCache.glPoints = null;
+                            updateVTKVolume();
+                            return;
+                        } catch (err) {
+                            console.warn('VTK init failed, using canvas fallback:', err);
+                        }
+                    }
+                    renderOptimizedFallback3D();
+                }).catch(() => {
+                    state.ui.vtkLoading = false;
+                    renderOptimizedFallback3D();
+                });
+                return;
+            }
+
+            document.getElementById('3d-rendering')?.classList.add('hidden');
+            renderOptimizedFallback3D();
+        }
+
+        function renderOptimizedFallback3D() {
+            if (!state.mask || !state.settings.showMask) {
+                document.getElementById('3d-rendering')?.classList.add('hidden');
+                return;
+            }
+
+            const canvas = els.viewports.v3d;
             const rect = canvas.parentElement.getBoundingClientRect();
-            const dpr = window.devicePixelRatio || 1;
-            // Set CSS size and backing store size for crisp rendering
+
+            _3dInitCache();
+            _3dRegeneratePoints();
+
+            if (!_3dCache.points || _3dCache.points.length === 0) {
+                document.getElementById('3d-rendering')?.classList.add('hidden');
+                return;
+            }
+
+            if (_3dRenderWebGL()) {
+                const ctx = canvas.getContext('2d');
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                ctx.drawImage(_3dGL.canvas, 0, 0);
+                ctx.globalCompositeOperation = 'source-over';
+                document.getElementById('3d-rendering')?.classList.add('hidden');
+                return;
+            }
+
+            const ctx = canvas.getContext('2d', { alpha: false });
+            const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+
             canvas.style.width = rect.width + 'px';
             canvas.style.height = rect.height + 'px';
             canvas.width = Math.max(1, Math.floor(rect.width * dpr));
             canvas.height = Math.max(1, Math.floor(rect.height * dpr));
             ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-            // Background gradient
-            const g = ctx.createLinearGradient(0, 0, 0, rect.height);
-            g.addColorStop(0, '#04060a');
-            g.addColorStop(1, '#000000');
-            ctx.fillStyle = g;
+            ctx.fillStyle = '#0a0a0f';
             ctx.fillRect(0, 0, rect.width, rect.height);
 
             const d = state.volume.dims;
             const cx = rect.width / 2;
             const cy = rect.height / 2;
-            const scale = Math.min(rect.width, rect.height) / Math.max(d.x, d.y, d.z) * 0.6;
+            const scale = Math.min(rect.width, rect.height) * 0.4;
 
-            // Smooth rotate state with small offset for nicer initial view
             const angleX = state.ui.rotate3D.x + Math.PI / 6;
             const angleY = state.ui.rotate3D.y + Math.PI / 6;
+            const cosX = Math.cos(angleX), sinX = Math.sin(angleX);
+            const cosY = Math.cos(angleY), sinY = Math.sin(angleY);
 
-            // Projection helper returns [x,y,depth]
-            const project = (x, y, z) => {
-                let dx = x - d.x / 2;
-                let dy = y - d.y / 2;
-                let dz = z - d.z / 2;
+            const points = _3dCache.points;
+            const len = points.length;
 
-                // Rotate Y
-                const x1 = dx * Math.cos(angleY) - dz * Math.sin(angleY);
-                const z1 = dx * Math.sin(angleY) + dz * Math.cos(angleY);
+            const size = Math.max(1, Math.min(4, (state.settings.renderQuality || 70) / 25));
 
-                // Rotate X
-                const y2 = dy * Math.cos(angleX) - z1 * Math.sin(angleX);
+            ctx.globalCompositeOperation = 'lighter';
 
-                // depth used for simple painter's sorting / shading
-                const depth = (z1 + d.z / 2) / d.z;
-                return [cx + x1 * scale, cy + y2 * scale, depth];
-            };
+            for (let i = 0; i < len; i++) {
+                const p = points[i];
 
-            // (Intentionally not drawing any bounding box or overlays)
+                const x1 = p.x * cosY - p.z * sinY;
+                const z1 = p.x * sinY + p.z * cosY;
+                const y2 = p.y * cosX - z1 * sinX;
 
-            // Draw point cloud (mask) with depth-sorted rendering for better occlusion
-            if (state.mask && state.settings.showMask) {
-                const totalVoxels = d.x * d.y * d.z;
-                // targetPoints based on quality slider (1..100)
-                const q = (state.settings && state.settings.renderQuality) ? state.settings.renderQuality : 70;
-                const targetPoints = Math.max(500, Math.min(40000, Math.round(2000 + (q / 100) * 20000)));
-                // compute stride such that roughly targetPoints will be sampled
-                const approxStride = Math.pow(totalVoxels / targetPoints, 1 / 3);
-                const stride = Math.max(1, Math.floor(approxStride));
+                const screenX = cx + x1 * scale;
+                const screenY = cy + y2 * scale;
+                const depth = 0.5 + z1 * 0.5;
 
-                const points = [];
-                for (let z = 0; z < d.z; z += stride) {
-                    for (let y = 0; y < d.y; y += stride) {
-                        for (let x = 0; x < d.x; x += stride) {
-                            const idx = x + y * d.x + z * d.x * d.y;
-                            const mv = state.mask.data[idx];
-                            if (mv > 0) {
-                                const p = project(x, y, z);
-                                const col = getLabelRgb(mv) || [255, 100, 100];
-                                points.push({ x: p[0], y: p[1], depth: p[2], color: col });
-                                if (points.length >= 25000) break; // hard cap safety (reduced for smoothing)
-                            }
-                        }
-                        if (points.length >= 25000) break;
-                    }
-                    if (points.length >= 25000) break;
-                }
+                const alpha = Math.max(0.1, Math.min(0.9, 0.6 - depth * 0.4));
 
-                // Painter's sort back -> front
-                points.sort((a, b) => a.depth - b.depth);
-
-                // Stronger smoothing: draw soft radial splats + subtle global blur
-                ctx.imageSmoothingEnabled = true;
-                // Use additive blending to allow colors to glow slightly when overlapping
-                ctx.globalCompositeOperation = 'lighter';
-
-                // Apply light blur filter for final smoothing (browsers that support canvas filter)
-                const prevFilter = ctx.filter || 'none';
-                ctx.filter = 'blur(0.6px)';
-
-                for (let i = 0; i < points.length; i++) {
-                    const p = points[i];
-                    // size and alpha based on depth (closer => larger/brighter)
-                    const size = Math.max(0.8, (1.8 - p.depth) * 2.0);
-                    const alpha = Math.max(0.035, Math.min(0.9, 0.95 - p.depth * 0.85));
-
-                    // Create a radial gradient for a smooth splat
-                    const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, Math.max(1, size * 3));
-                    grad.addColorStop(0, `rgba(${p.color[0]},${p.color[1]},${p.color[2]},${alpha})`);
-                    grad.addColorStop(0.6, `rgba(${p.color[0]},${p.color[1]},${p.color[2]},${alpha * 0.45})`);
-                    grad.addColorStop(1, `rgba(${p.color[0]},${p.color[1]},${p.color[2]},0)`);
-
-                    ctx.fillStyle = grad;
-                    ctx.beginPath();
-                    ctx.arc(p.x, p.y, size * 3, 0, Math.PI * 2);
-                    ctx.fill();
-                }
-
-                // restore filter and composite
-                ctx.filter = prevFilter;
-                ctx.globalCompositeOperation = 'source-over';
+                ctx.fillStyle = `rgba(${p.color[0]},${p.color[1]},${p.color[2]},${alpha.toFixed(3)})`;
+                ctx.beginPath();
+                ctx.arc(screenX, screenY, size, 0, Math.PI * 2);
+                ctx.fill();
             }
 
-            // (No focal highlight — show only mask points)
-
-            // hide placeholder
-            els.labels.text3d.classList.add('hidden');
+            ctx.globalCompositeOperation = 'source-over';
+            document.getElementById('3d-rendering')?.classList.add('hidden');
         }
 
-        // Animation loop for smooth rotation + inertia
+        let _3dNeedsRender = true;
+        let _3dIsRendering = false;
         function _3dStartLoop() {
             if (_3d_animHandle) return;
             const loop = () => {
-                // apply velocity (inertia)
-                state.ui.rotate3D.x += state.ui._3dRotateVel.x;
-                state.ui.rotate3D.y += state.ui._3dRotateVel.y;
+                const hasVelocity = Math.abs(state.ui._3dRotateVel.x) > 0.0001 || Math.abs(state.ui._3dRotateVel.y) > 0.0001;
 
-                // friction
-                state.ui._3dRotateVel.x *= 0.92;
-                state.ui._3dRotateVel.y *= 0.92;
+                if (hasVelocity) {
+                    state.ui.rotate3D.x += state.ui._3dRotateVel.x;
+                    state.ui.rotate3D.y += state.ui._3dRotateVel.y;
+                    state.ui._3dRotateVel.x *= 0.92;
+                    state.ui._3dRotateVel.y *= 0.92;
+                    _3dNeedsRender = true;
+                }
 
-                // small threshold to stop
-                if (Math.abs(state.ui._3dRotateVel.x) < 0.0005) state.ui._3dRotateVel.x = 0;
-                if (Math.abs(state.ui._3dRotateVel.y) < 0.0005) state.ui._3dRotateVel.y = 0;
+                if (_3dNeedsRender && !_3dIsRendering) {
+                    _3dIsRendering = true;
+                    requestAnimationFrame(() => {
+                        const useVTK = typeof vtk !== 'undefined' && state.ui.vtk && state.ui.vtk.initialized;
+                        if (useVTK) {
+                            if (state.ui.vtk.renderWindow) state.ui.vtk.renderWindow.render();
+                        } else {
+                            renderOptimizedFallback3D();
+                        }
+                        _3dNeedsRender = false;
+                        _3dIsRendering = false;
+                    });
+                }
 
-                render3D();
-                _3d_animHandle = requestAnimationFrame(loop);
+                if (hasVelocity || _3dNeedsRender) {
+                    _3d_animHandle = requestAnimationFrame(loop);
+                } else {
+                    _3d_animHandle = null;
+                }
             };
             _3d_animHandle = requestAnimationFrame(loop);
         }
@@ -1990,6 +2368,10 @@
         function _3dStopLoop() {
             if (_3d_animHandle) cancelAnimationFrame(_3d_animHandle);
             _3d_animHandle = null;
+        }
+
+        function _3dRequestRender() {
+            _3dNeedsRender = true;
         }
 
         // --- vtk.js Volume Rendering Integration ---
@@ -2089,23 +2471,19 @@
         function updateVTKVolume() {
             if (!state.ui.vtk || !state.ui.vtk.initialized) return;
             const { mapper, renderer, renderWindow, volume, ctfun, ofun } = state.ui.vtk;
-            // Prefer rendering the mask only
             if (!state.mask) {
-                // nothing to render
                 renderer.render();
                 return;
             }
 
             const d = state.mask.dims;
 
-            // Create vtkImageData from mask data
             const imageData = vtk.Common.DataModel.vtkImageData.newInstance();
             imageData.setOrigin(0, 0, 0);
-            const sp = state.mask.voxelDims || state.volume.voxelDims || { x: 1, y: 1, z: 1 };
+            const sp = state.mask.voxelDims || (state.volume && state.volume.voxelDims) || { x: 1, y: 1, z: 1 };
             imageData.setSpacing(sp.x || 1.0, sp.y || 1.0, sp.z || 1.0);
             imageData.setDimensions(d.x, d.y, d.z);
 
-            // Ensure typed array
             let values = state.mask.data;
             if (!(values instanceof Float32Array)) values = new Float32Array(values);
 
@@ -2114,28 +2492,23 @@
 
             mapper.setInputData(imageData);
 
-            // Build discrete transfer functions for labels present in mask
             ctfun.removeAllPoints();
             ofun.removeAllPoints();
 
-            // Transparent for zero
             ctfun.addRGBPoint(0, 0.0, 0.0, 0.0);
             ofun.addPoint(0, 0.0);
 
-            // Collect unique labels (bounded to avoid huge scans)
             const vals = values;
             const labels = new Set();
-            const limit = 200; // max unique labels to index
+            const limit = 200;
             for (let i = 0; i < vals.length; i++) {
                 const v = Math.round(vals[i]);
                 if (v > 0) labels.add(v);
                 if (labels.size >= limit) break;
             }
 
-            // If user provided labelMap, prefer that order
             const labelList = Object.keys(state.labelMap || {}).length > 0 ? Object.keys(state.labelMap).map(k => parseInt(k, 10)) : Array.from(labels);
             if (labelList.length === 0) {
-                // fallback: use a small palette for label 1
                 labelList.push(1);
             }
 
@@ -2145,12 +2518,10 @@
                 if (state.labelMap && state.labelMap[lab]) {
                     const entry = state.labelMap[lab];
                     if (typeof entry === 'string') {
-                        // legacy name-only entry; no color
                     } else if (typeof entry === 'object' && entry !== null) {
                         if (entry.color) color = parseHexColor(entry.color) || null;
                     }
                 }
-                // Fallback to default palette
                 if (!color) color = getMaskColor(lab) || [255, 0, 0];
 
                 const r = (color[0] || 255) / 255.0;
@@ -2160,14 +2531,11 @@
                 ofun.addPoint(lab, state.settings.maskOpacity || 0.5);
             }
 
-            // Hide placeholder (we have mask data to show)
             try { els.labels.text3d.classList.add('hidden'); } catch (e) { }
 
-            // Update mapper and render
-            // Map renderQuality (1..100) to sampleDistance (higher quality -> smaller sample distance)
             const q = (state.settings && state.settings.renderQuality) ? state.settings.renderQuality : 70;
-            const sd_min = 0.25; // highest quality
-            const sd_max = 1.2;  // lowest quality
+            const sd_min = 0.25;
+            const sd_max = 1.2;
             const sd = sd_max - (q / 100) * (sd_max - sd_min);
             try { mapper.setSampleDistance(sd); } catch (e) { }
             if (state.ui.vtk._needsCameraReset) {
@@ -2175,6 +2543,7 @@
                 state.ui.vtk._needsCameraReset = false;
             }
             renderWindow.render();
+            document.getElementById('3d-rendering')?.classList.add('hidden');
         }
 
         function disposeVTK3D() {
@@ -2184,20 +2553,43 @@
             } catch (e) { }
             try { state.ui.vtk.fullScreenRenderer.delete(); } catch (e) { }
             state.ui.vtk = null;
+            _3dCache.glPoints = null;
         }
 
-        function renderAll() {
-            if (renderAll._scheduled) return;
-            renderAll._scheduled = true;
-            requestAnimationFrame(() => {
+        function renderAll(immediate3D = false) {
+            const doRender = () => {
                 renderAll._scheduled = false;
+                renderAll._lastFrame = performance.now();
                 drawViewport('axial');
                 drawViewport('sagittal');
                 drawViewport('coronal');
-                // Only trigger 3D if it's currently visible/relevant
-                if (state.mask) render3D();
+                if (state.mask) {
+                    if (immediate3D) {
+                        render3D();
+                    } else {
+                        requestAnimationFrame(render3D);
+                    }
+                }
                 updateInfo();
-            });
+            };
+
+            if (renderAll._scheduled) {
+                renderAll._pending3D = renderAll._pending3D || immediate3D;
+                return;
+            }
+
+            renderAll._scheduled = true;
+            renderAll._pending3D = immediate3D;
+
+            const now = performance.now();
+            const lastFrame = renderAll._lastFrame || 0;
+            const minFrameInterval = 1000 / 60;
+
+            if (now - lastFrame >= minFrameInterval) {
+                requestAnimationFrame(doRender);
+            } else {
+                setTimeout(() => requestAnimationFrame(doRender), minFrameInterval - (now - lastFrame));
+            }
         }
 
         function updateInfo() {
@@ -2490,9 +2882,11 @@
                 const q = Number(e.target.value);
                 state.settings.renderQuality = q;
                 if (renderQualityVal) renderQualityVal.textContent = String(q);
-                // update renderers
                 try { updateVTKVolume(); } catch (err) { }
-                try { render3D(); } catch (err) { }
+                _3dCache.lastQuality = null;
+                _3dCache.glPoints = null;
+                _3dRequestRender();
+                try { renderOptimizedFallback3D(); } catch (err) { }
             });
         }
 
@@ -2697,8 +3091,9 @@
                         const mouseY = (mv.clientY - rect.top);
 
                         // Precise inverse transform
-                        const imgX = (mouseX - (offsetX + vpState.pan.x)) / totalScale;
-                        const imgY = (mouseY - (offsetY + vpState.pan.y)) / totalScale;
+                        // Pan is stored in CSS pixels, applied before scaling, so scale it by baseScale
+                        const imgX = (mouseX - offsetX - vpState.pan.x * baseScale) / (baseScale * vpState.zoom);
+                        const imgY = (mouseY - offsetY - vpState.pan.y * baseScale) / (baseScale * vpState.zoom);
 
                         if (axis === 'axial') {
                             state.crosshair.x = Math.max(0, Math.min(d.x - 1, Math.floor(imgX)));
@@ -2763,14 +3158,16 @@
         const v3d = els.viewports.v3d;
         const _v3dContainer = v3d.parentElement;
         _v3dContainer.addEventListener('pointerdown', (e) => {
-            // If vtk is active, let vtk's interactor handle pointer events
-            if (state.ui && state.ui.vtk && state.ui.vtk.initialized) return;
             if (!state.volume) return;
+
+            if (typeof vtk !== 'undefined' && state.ui.vtk && state.ui.vtk.initialized) {
+                return;
+            }
+
             e.preventDefault();
             _v3dContainer.setPointerCapture(e.pointerId);
             let lastX = e.clientX;
             let lastY = e.clientY;
-            // initialize small velocity
             state.ui._3dRotateVel.x = 0;
             state.ui._3dRotateVel.y = 0;
             _3dStartLoop();
@@ -2778,10 +3175,8 @@
             const onPointerMove = (mv) => {
                 const dx = mv.clientX - lastX;
                 const dy = mv.clientY - lastY;
-                // immediate rotation
                 state.ui.rotate3D.x += dy * 0.01;
                 state.ui.rotate3D.y += dx * 0.01;
-                // feed velocity for inertia
                 state.ui._3dRotateVel.x = dy * 0.002;
                 state.ui._3dRotateVel.y = dx * 0.002;
                 lastX = mv.clientX;
@@ -2793,7 +3188,6 @@
                 _v3dContainer.removeEventListener('pointermove', onPointerMove);
                 _v3dContainer.removeEventListener('pointerup', onUp);
                 _v3dContainer.removeEventListener('pointercancel', onUp);
-                // let inertia continue; loop will stop when velocity decays
             };
 
             _v3dContainer.addEventListener('pointermove', onPointerMove);
@@ -2801,11 +3195,19 @@
             _v3dContainer.addEventListener('pointercancel', onUp);
         });
 
-        // Double-click to reset 3D rotation
         _v3dContainer.addEventListener('dblclick', () => {
             state.ui.rotate3D = { x: 0, y: 0 };
             state.ui._3dRotateVel = { x: 0, y: 0 };
-            render3D();
+            _3dRequestRender();
+
+            if (typeof vtk !== 'undefined' && state.ui.vtk && state.ui.vtk.initialized) {
+                if (state.ui.vtk.renderer) {
+                    state.ui.vtk.renderer.resetCamera();
+                    if (state.ui.vtk.renderWindow) state.ui.vtk.renderWindow.render();
+                }
+            } else {
+                renderOptimizedFallback3D();
+            }
         });
 
         // Keyboard
